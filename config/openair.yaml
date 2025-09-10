@@ -1,0 +1,297 @@
+esphome:
+  name: open-air-mini
+  friendly_name: Open Air Mini
+
+  on_boot:
+    priority: -100   # Execute late in boot cycle, to allow initialization
+    then:
+      # Force the disconnect mode script, to ramp up fan RPM to allow it to start
+      - script.execute: publish_mode_states
+      - script.execute: disconnected_mode
+      - delay: 10s
+      - script.execute: disconnected_mode
+
+esp32:
+  board: esp32dev
+
+# Enable logging
+logger:
+  level: WARN
+
+# This is optional and can be commented out to disable the Web Server
+web_server:
+  port: 80
+
+# Enable Home Assistant API
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Open-AIR-Mini Fallback"
+
+captive_portal:
+
+globals:
+  # Disconnected Mode Max Fan Speed, linked to Disconnected Hum Level Max Speed
+  - id: disconnected_max_fan_speed
+    type: int
+    restore_value: no
+    initial_value: "35"
+  # Disconnected Mode Medium Fan Speed, linked to Disconnected Hum Level Medium Speed
+  - id: disconnected_medium_fan_speed
+    type: int
+    restore_value: no
+    initial_value: "25"
+  # Disconnected Mode Default Fan Speed, for humidities lower than Disconnected Hum Level Medium Speed
+  # or if NOT using a humidity sensor. Without sensor this speed will be maintained untill a connection
+  # to Home Assistant has been restored and your automations can take over.
+  - id: disconnected_default_fan_speed
+    type: int
+    restore_value: no
+    initial_value: "10"
+  # Disconnected Mode Max Fan Speed Threshold    
+  - id: disconnected_hum_level_max_speed
+    type: int
+    restore_value: no
+    initial_value: "85"
+  # Disconnected Mode Medium Fan Speed Threshold
+  - id: disconnected_hum_level_medium_speed
+    type: int
+    restore_value: no
+    initial_value: "75"
+  # 0=Auto,1=Low,2=Medium,3=High
+  - id: fan_mode_idx
+    type: int
+    restore_value: yes
+    initial_value: "0"
+  # Min speed is used for night cooling. It set's a floor where Auto mode cannot go under.
+  - id: min_speed_floor
+    type: int
+    restore_value: no
+    initial_value: "0"     # 0 = no floor
+
+# From V1.4.0 The Sensor pins on the Open AIR Mini are swapped. Correct example is below:
+uart:
+#UART For Sensor 2
+ - rx_pin: GPIO13
+   tx_pin: GPIO12
+   baud_rate: 9600
+   id: uart_sensor_2
+#UART For Sensor 1
+ - rx_pin: GPIO25
+   tx_pin: GPIO26
+   baud_rate: 9600
+   id: uart_sensor_1
+
+i2c:
+#I2C For Sensor 2
+- id: i2c_sensor_2
+  sda: GPIO19
+  scl: GPIO18
+  scan: false
+  frequency: 400kHz
+#I2C For Sensor 1
+- id: i2c_sensor_1
+  sda: GPIO16
+  scl: GPIO4
+  scan: false
+  frequency: 400kHz
+
+# Status led
+status_led:
+  pin:
+    number: GPIO33
+
+#PWM output for controlling the motor.
+output:
+  - platform: ledc
+    pin: GPIO15
+    inverted: true
+    id: open_air_mini_pwm
+
+fan:
+  - platform: speed
+    output: open_air_mini_pwm
+    name: "Open AIR Mini"
+    id: open_air_mini
+    
+sensor: 
+  - platform: pulse_counter
+    pin: GPIO14
+    unit_of_measurement: 'RPM'
+    name: 'AIR Mini RPM'
+    id: air_mini_rpm
+    update_interval: 5s
+    accuracy_decimals: 0
+
+  - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+  - platform: copy # Reports the WiFi signal strength in %
+    source_id: wifi_signal_db
+    name: "WiFi Signal Percent"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "Signal %"
+    entity_category: "diagnostic"
+    device_class: ""
+  - platform: scd4x
+    i2c_id: i2c_sensor_1 
+    co2:
+      name: "Open AIR Mini CO2"
+      id: open_air_mini_sensor_1_co2
+      accuracy_decimals: 0
+    temperature:
+      name: "Open AIR Mini Temperature"
+      id: open_air_mini_sensor_1_temperature
+      accuracy_decimals: 0
+    humidity:
+      name: "Open AIR Mini Humidity"
+      id: open_air_mini_sensor_1_humidity
+      accuracy_decimals: 1
+    update_interval: 10s
+    measurement_mode: periodic
+
+script:
+- id: disconnected_mode
+  mode: single
+  then:
+    - logger.log: "Disconnected Mode Triggered"
+    - fan.turn_on:
+        id: open_air_mini
+        speed: !lambda |-
+          auto hum = id(open_air_mini_sensor_1_humidity).state;
+          auto co2 = id(open_air_mini_sensor_1_co2).state;
+          auto currentfan = id(air_mini_rpm).state;
+
+          if (currentfan < 50 /* If the fan is not spinning, force high speed to start it */ ) {
+            return id(disconnected_max_fan_speed);
+          }
+
+          // Auto = max(hum, co2). Fixed for other modes.
+          int mode = id(fan_mode_idx);
+          if (mode == 1) return id(disconnected_default_fan_speed);
+          if (mode == 2) return 40;
+          if (mode == 3) return 80;
+
+          // ---- CO2 based desired speed (10–50%) ----
+          float co2_value = ((co2 - 450.0f) / 1200.0f) * 100.0f;
+          if (co2_value < 10.0f) co2_value = 10.0f;
+          if (co2_value > 50.0f) co2_value = 50.0f;
+
+          // ---- Humidity based discrete speeds ----
+          int hum_speed = id(disconnected_default_fan_speed);
+          if (hum >= id(disconnected_hum_level_max_speed)) {
+            hum_speed = id(disconnected_max_fan_speed);
+          } else if (hum >= id(disconnected_hum_level_medium_speed)) {
+            hum_speed = id(disconnected_medium_fan_speed);
+          }
+
+          // ---- Max of both ----
+          float final_speed = std::max(co2_value, (float)hum_speed);
+
+          // Apply speed floor (for night cooling)
+          final_speed = std::max(final_speed, (float) id(min_speed_floor));
+
+          ESP_LOGD("disconnected_mode", "CO2 speed=%.1f, HUM speed=%d, final=%.1f", co2_value, hum_speed, final_speed);
+
+          return (int)final_speed;
+- id: publish_mode_states
+  then:
+    - switch.template.publish:
+        id: sw_mode_auto
+        state: !lambda 'return id(fan_mode_idx)==0;'
+    - switch.template.publish:
+        id: sw_mode_low
+        state: !lambda 'return id(fan_mode_idx)==1;'
+    - switch.template.publish:
+        id: sw_mode_medium
+        state: !lambda 'return id(fan_mode_idx)==2;'
+    - switch.template.publish:
+        id: sw_mode_high
+        state: !lambda 'return id(fan_mode_idx)==3;'
+
+number:
+  - platform: template
+    name: "Open AIR Min Speed Floor"
+    id: min_speed_floor_number
+    optimistic: true
+    restore_value: false
+    unit_of_measurement: "%"
+    min_value: 10
+    max_value: 100
+    step: 5
+    set_action:
+      - lambda: 'id(min_speed_floor) = (int)x;'
+      - script.execute: disconnected_mode   # apply immediately
+
+switch:
+  - platform: template
+    name: "Mode Auto"
+    id: sw_mode_auto
+    icon: mdi:fan-auto
+    turn_on_action:
+      - lambda: 'id(fan_mode_idx)=0;'
+      - script.execute: publish_mode_states
+      - script.execute: disconnected_mode
+    turn_off_action:                  # keep latched
+      - switch.template.publish: { id: sw_mode_auto, state: ON }
+
+  - platform: template
+    name: "Mode Low"
+    id: sw_mode_low
+    icon: mdi:fan-speed-1
+    turn_on_action:
+      - lambda: 'id(fan_mode_idx)=1;'
+      - script.execute: publish_mode_states
+      - script.execute: disconnected_mode
+    turn_off_action:
+      - switch.template.publish: { id: sw_mode_low, state: ON }
+
+  - platform: template
+    name: "Mode Medium"
+    id: sw_mode_medium
+    icon: mdi:fan-speed-2
+    turn_on_action:
+      - lambda: 'id(fan_mode_idx)=2;'
+      - script.execute: publish_mode_states
+      - script.execute: disconnected_mode
+    turn_off_action:
+      - switch.template.publish: { id: sw_mode_medium, state: ON }
+
+  - platform: template
+    name: "Mode High"
+    id: sw_mode_high
+    icon: mdi:fan-speed-3
+    turn_on_action:
+      - lambda: 'id(fan_mode_idx)=3;'
+      - script.execute: publish_mode_states
+      - script.execute: disconnected_mode
+    turn_off_action:
+      - switch.template.publish: { id: sw_mode_high, state: ON }
+
+interval:
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            not:
+              api.connected:
+          then:
+            - lambda: |-
+                if (id(fan_mode_idx) != 0) {   // force Auto when disconnected
+                  id(fan_mode_idx) = 0;
+                  id(publish_mode_states).execute();
+                }
+                id(min_speed_floor) = 10;
+      - script.execute: disconnected_mode

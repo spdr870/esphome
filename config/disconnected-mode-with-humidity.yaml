@@ -1,0 +1,20 @@
+---
+- id: disconnected_mode
+  mode: single
+  then:
+    - logger.log: "Disconnected Mode Triggered"
+    - fan.turn_on:
+        id: open_air_mini
+        speed: !lambda |-
+          auto hum = id(open_air_mini_sensor_1_humidity).state;
+          auto co2 = id(open_air_mini_sensor_1_co2).state;
+          if (hum >= id(disconnected_hum_level_max_speed)) {
+            return id(disconnected_max_fan_speed);
+          } else if (co2 >= id(disconnected_co2_level_max_speed)) {
+            return id(disconnected_max_fan_speed);
+          } else if (hum >= id(disconnected_hum_level_medium_speed)) {
+            return id(disconnected_medium_fan_speed);
+          } else if (co2 >= id(disconnected_co2_level_medium_speed)) {
+            return id(disconnected_medium_fan_speed);
+          }
+          return id(disconnected_default_fan_speed);

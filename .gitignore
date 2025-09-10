@@ -1,0 +1,5 @@
+# Ignore .esphome directories at any level
+**/.esphome/
+
+# Ignore Python cache directories
+**/__pycache__/

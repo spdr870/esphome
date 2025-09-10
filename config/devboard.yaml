@@ -1,0 +1,319 @@
+esphome:
+  name: "outdoor_sensor"
+  friendly_name: "Outdoor Temp Sensor"
+  on_boot:
+    then:
+      - output.turn_off: onboard_led_pwm   # onboard LED altijd uit
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+  version: 2
+  include_internal: true
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+  ap:
+    ssid: "Devboard Fallback Hotspot"
+
+time:
+  - platform: sntp
+    id: esptime
+    timezone: Europe/Amsterdam
+
+font:
+  - file: "gfonts://Roboto"
+    id: small
+    size: 11
+  - file: "gfonts://Roboto"
+    id: large
+    size: 22
+
+i2c:
+  - id: bus_display
+    sda: GPIO21
+    scl: GPIO22
+    scan: false
+  - id: bus_sht
+    sda: 19
+    scl: 18
+    scan: true
+    frequency: 100kHz
+
+# ---- Globals ----
+globals:
+  - id: presence_detected
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Single "last seen" timer for any Inkbird reading (ms since boot)
+  - id: probes_last_seen_ms
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+# ---- OLED display ----
+display:
+  - platform: ssd1306_i2c
+    i2c_id: bus_display
+    model: "SSD1306 128x64"
+    id: oled_display
+    address: 0x3C
+    update_interval: 1s
+    lambda: |-
+      // Als er BBQ probe-waarden zijn, toon die met kleine font i.p.v. datum/tijd
+      bool p1 = id(ibbq_p1).has_state() && !std::isnan(id(ibbq_p1).state);
+      bool p2 = id(ibbq_p2).has_state() && !std::isnan(id(ibbq_p2).state);
+      bool p3 = id(ibbq_p3).has_state() && !std::isnan(id(ibbq_p3).state);
+      bool p4 = id(ibbq_p4).has_state() && !std::isnan(id(ibbq_p4).state);
+
+      bool has_prove_values = p1 || p2 || p3 || p4;
+
+      // Display aan bij presence
+      if (!id(presence_detected) && !has_prove_values) return;
+
+      // Boven: kamer T/H (zoals voorheen)
+      if (id(temperature).has_state()) {
+        it.print(0, 0, id(small), TextAlign::TOP_LEFT, "T");
+        it.printf(10, 0, id(large), TextAlign::TOP_LEFT, "%.1f°C", id(temperature).state);
+      }
+      if (id(humidity).has_state()) {
+        it.printf(127, 0, id(large), TextAlign::TOP_RIGHT, "%.0f%%", id(humidity).state);
+        it.print(127 - 41, 0, id(small), TextAlign::TOP_RIGHT, "H");
+      }
+
+      if (has_prove_values) {
+        // Vier regels onder elkaar, allemaal small font
+        int y = 30;
+        auto print_probe = [&](int x, int y, const char* label, esphome::template_::TemplateSensor* s){
+          it.print(x, y, id(small), TextAlign::TOP_LEFT, label);
+          if (s->has_state() && !std::isnan(s->state)) {
+            it.printf(x + 14, y, id(small), TextAlign::TOP_LEFT, "%.0f°C", s->state);
+          } else {
+            it.print(x + 14, y, id(small), TextAlign::TOP_LEFT, "--");
+          }
+        };
+        print_probe(0,  30, "1:", id(ibbq_p1));
+        print_probe(0,  42, "2:", id(ibbq_p2));
+        print_probe(54, 30, "3:", id(ibbq_p3));
+        print_probe(54, 42, "4:", id(ibbq_p4));
+
+        // --- Weber kettle (icon-style) with animated smoke on the right ---
+        const int cx = 112;     // kettle center X
+        const int cy = 44;      // bowl top (rim) is around cy
+        const int r  = 13;      // bowl radius
+        const int thick = 3;    // "bold" thickness for strokes
+
+        // Helper: draw a thick horizontal line
+        auto thick_hline = [&](int x1, int x2, int y, int w) {
+          for (int i = -(w/2); i <= (w/2); i++) it.line(x1, y + i, x2, y + i);
+        };
+
+        // Helper: draw the semicircle outline (lower half) with given thickness
+        auto semi_outline = [&](int cx, int cy, int r, int w) {
+          for (int k = 0; k < w; k++) {
+            int rr = r - k;
+            if (rr <= 0) break;
+            for (int y = 0; y <= rr; y++) {
+              float val = (float)rr * (float)rr - (float)y * (float)y;
+              if (val < 0) continue;
+              int dx = (int)(sqrtf(val) + 0.5f);
+              // draw only the lower half (outline points at left/right)
+              it.draw_pixel_at(cx - dx, cy + y);
+              it.draw_pixel_at(cx + dx, cy + y);
+            }
+          }
+        };
+
+        // Helper: "thick-ish" diagonal leg (draw a few parallel lines)
+        auto thick_diag = [&](int x1, int y1, int x2, int y2, int w) {
+          for (int o = -w/2; o <= w/2; o++) {
+            it.line(x1 + o, y1, x2 + o, y2);
+            it.line(x1, y1 + o, x2, y2 + o);
+          }
+        };
+
+        // 1) Rim (bold, a bit wider than bowl)
+        thick_hline(cx - (r + 2), cx + (r + 2), cy, thick);
+
+        // 2) Bowl semicircle (bold outline)
+        semi_outline(cx, cy, r, thick);
+
+        // 3) Legs (angled like the icon)
+        thick_diag(cx - 6, cy + r, cx - 12, cy + r + 12, 3);
+        thick_diag(cx + 6, cy + r, cx + 12, cy + r + 12, 3);
+
+        // 4) Animated smoke: three slanted strokes ("/") floating up
+        //    Simple 6-phase bobbing: [-1,0,1,0,-1,0] pixels vertical offset
+        int ph = ((int)(millis() / 220)) % 6;
+        int off_table[6] = {-1, 0, 1, 0, -1, 0};
+
+        auto smoke_stroke = [&](int sx, int sy, int phase_offset) {
+          int dy = off_table[(ph + phase_offset) % 6];
+          // Draw 3 parallel lines for a thicker look
+          for (int w = -1; w <= 1; w++) {
+            it.line(sx + w,     sy + dy,     sx + 6 + w, sy - 8 + dy);  // "/"
+          }
+        };
+
+        int base_y = cy - 6;  // start a bit above the rim
+        smoke_stroke(cx - 11, base_y, 0);
+        smoke_stroke(cx - 2,  base_y + 2, 2);
+        smoke_stroke(cx + 7,  base_y, 4);
+      } else {
+        // Geen probe-waarden? toon datum/tijd zoals voorheen
+        it.strftime(0,  30, id(large), TextAlign::TOP_LEFT,  "%d/%m", id(esptime).now());
+        it.strftime(127, 30, id(large), TextAlign::TOP_RIGHT, "%H:%M", id(esptime).now());
+
+        // Onder: stippellijn + seconde-indicator
+        int sec = id(esptime).now().second;
+        int x_pos = (sec * 127) / 59;
+        for (int x = 0; x <= 127; x += 4) it.draw_pixel_at(x, 63);
+        int tip_x = x_pos, tip_y = 62;
+        int left_x = x_pos - 3, right_x = x_pos + 3, base_y = 58;
+        it.filled_triangle(left_x, base_y, right_x, base_y, tip_x, tip_y);
+      }
+
+# ---- PIR presence ----
+binary_sensor:
+  - platform: gpio
+    name: "PIR Sensor"
+    pin:
+      number: GPIO33
+    device_class: motion
+    filters:
+      - delayed_on: 2s
+      - delayed_off: 5s
+    on_press:
+      then:
+        - globals.set: { id: presence_detected, value: 'true' }
+    on_release:
+      then:
+        - globals.set: { id: presence_detected, value: 'false' }
+
+# ---- LEDs (GPIO2 is a strapping pin; only used for onboard LED) ----
+light:
+  - platform: monochromatic
+    output: onboard_led_pwm
+    id: onboard_led
+    name: "Onboard LED"
+
+output:
+  - platform: ledc
+    id: output_led
+    pin: GPIO4
+  - platform: ledc
+    pin: GPIO2
+    id: onboard_led_pwm
+
+# ---- Sensors: room T/H + Inkbird probes ----
+sensor:
+  # Room DHT
+  - platform: sht4x
+    i2c_id: bus_sht
+    address: 0x44
+    update_interval: 10s
+    temperature:
+      id: temperature
+      name: "Temperature"
+    humidity:
+      id: humidity
+      name: "Humidity"
+
+  # Probe sensors (template). We manually clear them after timeout.
+  - platform: template
+    id: ibbq_p1
+    name: "BBQ Probe 1"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 0
+    update_interval: never
+    filters:
+      - lambda: |-
+          if ((int)roundf(x) == 301) return NAN;          // 301 °C wegfilteren
+          return x;
+  - platform: template
+    id: ibbq_p2
+    name: "BBQ Probe 2"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    id: ibbq_p3
+    name: "BBQ Probe 3"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    id: ibbq_p4
+    name: "BBQ Probe 4"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 0
+    update_interval: never
+
+captive_portal:
+
+# ---- BLE Inkbird parsing (advertisements) ----
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 2000ms   # scan cycle every 2 seconds
+    window: 30ms       # listen for 30 ms each cycle
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            // Accepteer veelgebruikte Inkbird-namen
+            auto name = x.get_name();
+            if (name != "iBBQ" && name.find("Inkbird") == std::string::npos) return;
+
+            // Parse manufacturer data; temps in little-endian deci-°C
+            for (auto data : x.get_manufacturer_datas()) {
+              auto &d = data.data;
+              if (d.size() < 16) return;  // genoeg bytes?
+
+              auto rd = [&](int lo){ return (int)d[lo] | ((int)d[lo+1] << 8); };
+
+              int p1 = rd(8);
+              int p2 = rd(10);
+              int p3 = rd(12);
+              int p4 = rd(14);
+
+              // Reset gezamenlijke timeout zodra we een geldig Inkbird frame zien
+              id(probes_last_seen_ms) = (int)millis();
+
+              // Publiceer waarden (60000 = "not connected" -> unknown)
+              (p1 < 60000) ? id(ibbq_p1).publish_state(p1 / 10.0f) : id(ibbq_p1).publish_state(NAN);
+              (p2 < 60000) ? id(ibbq_p2).publish_state(p2 / 10.0f) : id(ibbq_p2).publish_state(NAN);
+              (p3 < 60000) ? id(ibbq_p3).publish_state(p3 / 10.0f) : id(ibbq_p3).publish_state(NAN);
+              (p4 < 60000) ? id(ibbq_p4).publish_state(p4 / 10.0f) : id(ibbq_p4).publish_state(NAN);
+            }
+
+# ---- Timeout: clear ALL probes to unknown after Xs without any Inkbird adverts ----
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          const int TIMEOUT_MS = 10000;  // 10s
+          int now_ms = (int)millis();
+          if (id(probes_last_seen_ms) > 0 && (now_ms - id(probes_last_seen_ms)) > TIMEOUT_MS) {
+            id(ibbq_p1).publish_state(NAN);
+            id(ibbq_p2).publish_state(NAN);
+            id(ibbq_p3).publish_state(NAN);
+            id(ibbq_p4).publish_state(NAN);
+            id(probes_last_seen_ms) = 0;
+          }

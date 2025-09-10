@@ -1,0 +1,10 @@
+{
+  "name": "touch_panel",
+  "version": "1.0",
+  "dependencies": [
+    {
+      "name": "TFT_eSPI",
+      "version": "^2.5.43"
+    }
+  ]
+}
