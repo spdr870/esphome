@@ -19,18 +19,38 @@ esphome:
       - -D TFT_CS=5
       - -D TFT_DC=2
       - -D TFT_RST=4
-      - -D SPI_FREQUENCY=20000000
+      - -D SPI_FREQUENCY=27000000
       - -D TFT_BL=32
       - -D TFT_BACKLIGHT_ON=1
+      - -D USE_DMA_TO_TFT
   on_boot:
     priority: -100
     then:
       - lambda: |-
           auto *p = id(my_panel);
-          p->add_item(new touch_panel::EnvItem("env", 0), /*col=*/1, /*row=*/0, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
+          p->add_item(new touch_panel::EnvItem("env", 0), /*col=*/4, /*row=*/0, /*colspan=*/2, /*rowspan=*/2, /*page=*/0);
+          //p->add_item(new touch_panel::ClockItem("env", 0), /*col=*/2, /*row=*/0, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
+          p->add_item(new touch_panel::AnalogClockItem("env", 0), /*col=*/0, /*row=*/0, /*colspan=*/3, /*rowspan=*/3, /*page=*/0);
+          
           //p->add_paging_buttons({0,1}, {2,1}, 0);
-          p->add_button("btn_makita", "Makita", 1, 1, 1, 1, 0);
-          p->set_item_click("btn_makita", [](){ id(my_cool_switch_from_ha).toggle(); });
+          
+          p->add_button("btn_makita", "Makita", /*col=*/4, /*row=*/4, /*colspan=*/2, /*rowspan=*/2, /*page=*/0);
+          p->set_item_click("btn_makita", [](){ id(my_makita_charger).toggle(); });
+
+          p->add_light("btn_light_hall", "Hall", /*col=*/2, /*row=*/4, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
+          p->set_item_click("btn_light_hall", [](){ id(ha_light_hall).toggle(); });
+
+          p->add_light("btn_light_kitchen_table", "Kitchen", /*col=*/0, /*row=*/4, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
+          p->set_item_click("btn_light_kitchen_table", [](){ id(ha_light_kitchen_table).toggle(); });
+
+          p->add_light("btn_light_kitchen_countertop", "Counter", /*col=*/1, /*row=*/4, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
+          p->set_item_click("btn_light_kitchen_countertop", [](){ id(ha_light_kitchen_countertop).toggle(); });
+
+          p->add_light("btn_light_living_table", "Living", /*col=*/0, /*row=*/5, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
+          p->set_item_click("btn_light_living_table", [](){ id(ha_light_living_table).toggle(); });
+
+          p->add_light("btn_light_living_seating", "Seating", /*col=*/1, /*row=*/5, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
+          p->set_item_click("btn_light_living_seating", [](){ id(ha_light_living_seating).toggle(); });
 
 esp32:
   board: esp32dev
@@ -41,6 +61,17 @@ time:
   - platform: sntp
     id: sntp_time
     timezone: Europe/Amsterdam
+    on_time:
+      - seconds: /1
+        then:
+          - lambda: |-
+              auto time = id(sntp_time).now();
+              int hours = time.hour;
+              int minutes = time.minute;
+              int seconds = time.second;
+
+              auto *p = id(my_panel);
+              p->set_time(hours, minutes, seconds);
 
 logger:
   level: WARN
@@ -56,7 +87,6 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
-# SPI zoals in je Arduino sketch
 spi:
   clk_pin: GPIO18
   mosi_pin: GPIO23
@@ -68,7 +98,6 @@ i2c:
   scan: true
 
 sensor:
-  # AHT20: temperature + humidity (I2C address is 0x38)
   - platform: aht10
     variant: AHT20
     address: 0x38
@@ -80,26 +109,24 @@ sensor:
       id: panel_hum
       name: "Panel Humidity"
 
-  # BMP280: barometric pressure (common I2C addresses: 0x76 or 0x77)
   - platform: bmp280_i2c
     address: 0x77           # change to 0x77 if scan shows that instead
     update_interval: 30s
     pressure:
       name: "Panel Pressure"
 
-
-# Laad je externe component (lokale map)
 external_components:
   - source:
       type: local
       path: ./components
 
-# Instantieer je C++ component
 touch_panel:
   id: my_panel
   tft_cs: 5
   touch_cs: 26
   touch_irq: 27
+  cols: 6
+  rows: 6
 
 interval:
   - interval: 30s
@@ -111,8 +138,8 @@ output:
   - platform: gpio
     id: bl_pin
     pin:
-      number: GPIO32      # your BL pin
-#      inverted: true      # <— try this first
+      number: GPIO32
+#      inverted: true
 switch:
   - platform: output
     id: display_bl
@@ -121,14 +148,70 @@ switch:
   - platform: homeassistant
     internal: False
     name: "Makita"
-    id: my_cool_switch_from_ha
-    entity_id: switch.0x70b3d52b601024b5
+    id: my_makita_charger
+    entity_id: switch.makita
     on_turn_on:
       - lambda: |-
           id(my_panel).set_button_state("btn_makita", true);
     on_turn_off:
       - lambda: |-
           id(my_panel).set_button_state("btn_makita", false);
+  - platform: homeassistant
+    internal: False
+    name: "LightHall"
+    id: ha_light_hall
+    entity_id: light.hall
+    on_turn_on:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_hall", true);
+    on_turn_off:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_hall", false);
+  - platform: homeassistant
+    internal: False
+    name: "LightKitchenTable"
+    id: ha_light_kitchen_table
+    entity_id: light.kitchen_table
+    on_turn_on:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_kitchen_table", true);
+    on_turn_off:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_kitchen_table", false);
+  - platform: homeassistant
+    internal: False
+    name: "LightKitchenCountertop"
+    id: ha_light_kitchen_countertop
+    entity_id: light.kitchen_countertop
+    on_turn_on:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_kitchen_countertop", true);
+    on_turn_off:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_kitchen_countertop", false);
+  - platform: homeassistant
+    internal: False
+    name: "LightLivingTable"
+    id: ha_light_living_table
+    entity_id: light.living_table
+    on_turn_on:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_living_table", true);
+    on_turn_off:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_living_table", false);
+  - platform: homeassistant
+    internal: False
+    name: "LightLivingSeating"
+    id: ha_light_living_seating
+    entity_id: light.living_seating
+    on_turn_on:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_living_seating", true);
+    on_turn_off:
+      - lambda: |-
+          id(my_panel).set_button_state("btn_light_living_seating", false);
+
 
 binary_sensor:
   - platform: gpio

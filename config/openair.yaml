@@ -14,11 +14,9 @@ esphome:
 esp32:
   board: esp32dev
 
-# Enable logging
 logger:
   level: WARN
 
-# This is optional and can be commented out to disable the Web Server
 web_server:
   port: 80
 
@@ -244,7 +242,7 @@ switch:
       - lambda: 'id(fan_mode_idx)=0;'
       - script.execute: publish_mode_states
       - script.execute: disconnected_mode
-    turn_off_action:                  # keep latched
+    turn_off_action:
       - switch.template.publish: { id: sw_mode_auto, state: ON }
 
   - platform: template
