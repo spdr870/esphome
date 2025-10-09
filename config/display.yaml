@@ -3,9 +3,13 @@ esphome:
   platformio_options:
     lib_deps:
       - SPI
-      - bodmer/TFT_eSPI@^2.5.43
-      - paulstoffregen/XPT2046_Touchscreen@0.0.0-alpha+sha.26b691b2c8
+      #- bodmer/TFT_eSPI@^2.5.43
+      #- paulstoffregen/XPT2046_Touchscreen@0.0.0-alpha+sha.26b691b2c8
+      - bodmer/TFT_eSPI
+      - paulstoffregen/XPT2046_Touchscreen
+    board_build.arduino.memory_type: qio_opi
     build_flags:
+      - -D BOARD_HAS_PSRAM
       - -D LOAD_FONT2
       - -D LOAD_FONT4
       - -D USER_SETUP_LOADED
@@ -13,18 +17,17 @@ esphome:
       - -D TFT_WIDTH=480
       - -D TFT_HEIGHT=320
       - -D TFT_RGB_ORDER=TFT_BGR
-      - -D TFT_MOSI=23
-      - -D TFT_MISO=19
+      - -D TFT_MOSI=13
+      - -D TFT_MISO=12
       - -D TFT_SCLK=18
       - -D TFT_CS=5
       - -D TFT_DC=2
       - -D TFT_RST=4
       - -D SPI_FREQUENCY=27000000
-      - -D TFT_BL=32
+      - -D TFT_BL=38
       - -D TFT_BACKLIGHT_ON=1
-      - -D USE_DMA_TO_TFT
   on_boot:
-    priority: -100
+    priority: -200
     then:
       - lambda: |-
           auto *p = id(my_panel);
@@ -52,10 +55,19 @@ esphome:
           p->add_light("btn_light_living_seating", "Seating", /*col=*/1, /*row=*/5, /*colspan=*/1, /*rowspan=*/1, /*page=*/0);
           p->set_item_click("btn_light_living_seating", [](){ id(ha_light_living_seating).toggle(); });
 
+          p->ready();
+
 esp32:
-  board: esp32dev
+  board: esp32-s3-devkitc-1
+  variant: ESP32S3
+  cpu_frequency: 240MHZ
   framework:
     type: arduino
+#  flash_size: 16MB
+
+psram:
+  mode: octal
+  speed: 40MHz
 
 time:
   - platform: sntp
@@ -74,11 +86,12 @@ time:
               p->set_time(hours, minutes, seconds);
 
 logger:
-  level: WARN
+  level: DEBUG
 
 api:
 
 web_server:
+  port: 80
 
 ota:
   - platform: esphome
@@ -89,12 +102,12 @@ wifi:
 
 spi:
   clk_pin: GPIO18
-  mosi_pin: GPIO23
-  miso_pin: GPIO19
+  mosi_pin: GPIO13
+  miso_pin: GPIO12
 
 i2c:
-  sda: 22
-  scl: 21
+  sda: 11
+  scl: 10
   scan: true
 
 sensor:
@@ -123,8 +136,8 @@ external_components:
 touch_panel:
   id: my_panel
   tft_cs: 5
-  touch_cs: 26
-  touch_irq: 27
+  touch_cs: 9
+  touch_irq: 17
   cols: 6
   rows: 6
 
@@ -134,17 +147,28 @@ interval:
       - lambda: |-
           id(my_panel).set_env(id(panel_temp).state, id(panel_hum).state);
 
+light:
+  - platform: esp32_rmt_led_strip
+    name: "Onboard RGB"
+    id: onboard_rgb
+    pin: GPIO48
+    num_leds: 1
+    chipset: WS2812
+    rgb_order: GRB
+    effects:
+      - addressable_rainbow:
+
 output:
   - platform: gpio
     id: bl_pin
     pin:
-      number: GPIO32
+      number: GPIO38
 #      inverted: true
 switch:
   - platform: output
     id: display_bl
     output: bl_pin
-    restore_mode: ALWAYS_OFF
+    restore_mode: ALWAYS_ON
   - platform: homeassistant
     internal: False
     name: "Makita"
@@ -218,18 +242,28 @@ binary_sensor:
     id: pir_motion
     name: "Radar Presence"
     pin:
-      number: GPIO33
+      number: GPIO7
      # mode: INPUT_PULLUP       # or INPUT if the board has a pull-down resistor
      # inverted: false        # needed if output is active-low
     device_class: motion
     filters:
       - delayed_off: 1s
       - delayed_on: 250ms
-    on_press:
-      - switch.turn_on: display_bl
-      - lambda: |-
-          id(my_panel).sleep(false);
-    on_release:
-      - switch.turn_off: display_bl
-      - lambda: |-
-          id(my_panel).sleep(true);
+    #on_press:
+    #   - script.execute: display_on
+    #on_release:
+    #   - script.execute: display_off
+
+script:
+- id: display_on
+  mode: queued
+  then:
+    - switch.turn_on: display_bl
+    - lambda: |-
+        id(my_panel).request_sleep(false);
+- id: display_off
+  mode: queued
+  then: 
+    - switch.turn_off: display_bl
+    - lambda: |-
+        id(my_panel).request_sleep(true);

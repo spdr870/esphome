@@ -4,6 +4,8 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
+#include <mutex>
+#include <atomic>
 
 #include "PanelItem.h"
 #include "LightItem.h"
@@ -27,10 +29,21 @@ public:
   : tft_cs_(tft_cs), touch_cs_(touch_cs), touch_irq_(touch_irq),
     ts_(touch_cs_, touch_irq_), cols_(cols), rows_(rows), scratch_(&tft_) {}
 
+  ~Panel() {
+    // Free items we own
+    for (auto* it : items_) delete it;
+    items_.clear();
+    last_bounds_.clear();
+    // Free the sprite buffer
+    scratch_.deleteSprite();
+  }
+
   void setup() override {
-    SPI.begin(18,19,23);
-    pinMode(tft_cs_, OUTPUT);   digitalWrite(tft_cs_, HIGH);
-    pinMode(touch_cs_, OUTPUT); digitalWrite(touch_cs_, HIGH);
+    pinMode(tft_cs_, OUTPUT);
+    digitalWrite(tft_cs_, HIGH);
+    pinMode(touch_cs_, OUTPUT);
+    digitalWrite(touch_cs_, HIGH);
+    SPI.begin(TFT_SCLK,TFT_MISO,TFT_MOSI);
     if (touch_irq_ >= 0) pinMode(touch_irq_, INPUT_PULLUP);
 
 #ifdef TFT_BL
@@ -39,6 +52,7 @@ public:
 #endif
 
     tft_.init();
+
     tft_.setRotation(3);
     tft_.setSwapBytes(true);
     tft_.invertDisplay(true);
@@ -50,6 +64,7 @@ public:
     grid_   = screen_;
     compute_grid_();
 
+    digitalWrite(touch_cs_, HIGH);
     tft_.fillScreen(TFT_BLACK);
 
     // Prepare shared scratch sprite (lazy sized on first use)
@@ -58,7 +73,11 @@ public:
   }
 
   void loop() override {
-    if (sleeping_) return;
+    power_step_();
+
+    if (pwr_ != AWAKE) {
+      return;
+    }
 
     uint32_t now = millis();
     for (auto* it : items_) if (it->Page()==current_page_) it->Tick(now);
@@ -69,7 +88,6 @@ public:
     // Reuse the shared sprite for all items on the page.
     for (auto* it : items_) {
       if (it->Page()!=current_page_) continue;
-
       if (!it->ClearDirty()) continue;
 
       // Ensure sprite is at least the item's size; only grow (rare).
@@ -81,15 +99,25 @@ public:
 
       // Let the item render into the shared sprite and push.
       it->RenderIfDirty(tft_, scratch_);
-      
-      tft_.startWrite();
-      scratch_.pushSprite(b.x, b.y, 0, 0, b.w, b.h);
-      tft_.endWrite();
+
+      // Ensure touch is not selected while we talk to TFT
+      //digitalWrite(touch_cs_, HIGH);
+      digitalWrite(touch_cs_, HIGH);
+      //std::lock_guard<std::mutex> lk(spi_mtx_);
+      tft_tx([&](){
+        scratch_.pushSprite(b.x, b.y, 0, 0, b.w, b.h);
+      });
     }
 
     if (items_.empty()) {
-      tft_.setTextColor(tft_.color565(random(256), random(256), random(256)), TFT_BLACK);
-      tft_.drawString("Hello!", 10, 10, 4);
+      if ((int32_t)(now - deadline_) >= 0) {
+        deadline_ = now + 100;
+        //std::lock_guard<std::mutex> lk(spi_mtx_);
+        tft_tx([&](){
+          tft_.setTextColor(tft_.color565(random(256), random(256), random(256)), TFT_BLACK);
+          tft_.drawString("Hello!", 10, 10, 4);
+        });
+      }
     }
   }
 
@@ -148,23 +176,19 @@ public:
   void prev_page(){ set_page_(current_page_==0 ? max_page_() : current_page_-1); }
   int  page() const { return current_page_; }
 
-  void sleep(bool on) {
-    if (on && !sleeping_) {
-      tft_.writecommand(0x28);
-      delay(20);
-      tft_.writecommand(0x10);
-      sleeping_ = true;
-    } else if (!on && sleeping_) {
-      tft_.writecommand(0x11);
-      delay(120);
-      tft_.writecommand(0x29);
-      sleeping_ = false;
-      tft_.fillScreen(TFT_BLACK);
-      invalidate_visible_page_();
-    }
+  void ready()
+  {
+    pwr_ = AWAKE;
+    requestSleep_ = false;
+  }
+
+  void request_sleep(bool on)
+  {
+    requestSleep_ = on;
   }
 
 private:
+  std::mutex spi_mtx_;
   // ---------- Hardware ----------
   int tft_cs_, touch_cs_, touch_irq_;
   TFT_eSPI tft_;
@@ -182,7 +206,103 @@ private:
   std::unordered_map<IPanelItem*,Rect> last_bounds_;
 
   int current_page_{0};
-  bool sleeping_{false};
+  
+  enum PwrState { NOINIT, AWAKE, GOING_OFF_DISPOFF, GOING_OFF_SLEEPIN_WAIT, SLEEPING,
+                WAKING_SLEEPOUT_WAIT, WAKING_DISPON, WAKING_SETTLE_WAIT };
+  PwrState pwr_ = AWAKE;
+  uint32_t deadline_ = 0;
+
+  std::atomic<bool> requestSleep_{false};
+
+  inline void tft_tx(std::function<void()> fn) {
+    std::lock_guard<std::mutex> lk(spi_mtx_);
+  #ifdef TFT_eSPI_ENABLE_DMA
+    tft_.dmaWait();                  // finish any prior DMA first
+  #endif
+    tft_.startWrite();
+    fn();                            // do the SPI writes
+    tft_.endWrite();
+  }
+
+  inline bool touch_read(TS_Point &p) {
+    std::lock_guard<std::mutex> lk(spi_mtx_);
+  #ifdef TFT_eSPI_ENABLE_DMA
+    tft_.dmaWait();                  // make sure TFT is idle before reading touch
+  #endif
+    p = ts_.getPoint();              // XPT2046 lib handles its own CS
+    return true;
+  }
+
+  inline void lcd_cmd(uint8_t c) {
+    std::lock_guard<std::mutex> lk(spi_mtx_);
+    #ifdef TFT_eSPI_ENABLE_DMA
+    tft_.dmaWait();
+    #endif
+    tft_.startWrite();
+    tft_.writecommand(c);
+    tft_.endWrite();
+  }
+
+  const char* pwr_to_str(PwrState s) {
+    switch (s) {
+      case AWAKE: return "AWAKE";
+      case GOING_OFF_DISPOFF: return "OFF_DISPOFF";
+      case GOING_OFF_SLEEPIN_WAIT: return "OFF_SLEEPIN";
+      case SLEEPING: return "SLEEPING";
+      case WAKING_SLEEPOUT_WAIT: return "WAKE_OUT_WAIT";
+      case WAKING_SETTLE_WAIT: return "WAKE_SETTLE";
+      default: return "?";
+    }
+  }
+
+  void power_step_() {
+    const uint32_t now = millis();
+
+    switch (pwr_) {
+      case AWAKE:
+        if (requestSleep_) {
+          // (Optional) backlight off here
+          lcd_cmd(0x28); // DISPOFF
+          deadline_ = now + 20;
+          pwr_ = GOING_OFF_DISPOFF;
+        }
+        break;
+
+      case SLEEPING:
+        if (!requestSleep_) {
+          lcd_cmd(0x11); // SLEEP OUT
+          deadline_ = now + 120;
+          pwr_ = WAKING_SLEEPOUT_WAIT;
+        }
+        break;
+    }
+    
+    if ((int32_t)(now - deadline_) >= 0) {
+      switch (pwr_) {
+        case GOING_OFF_DISPOFF:
+          lcd_cmd(0x10); // SLEEP IN
+          deadline_ = now + 120;
+          pwr_ = GOING_OFF_SLEEPIN_WAIT;
+          break;
+
+        case GOING_OFF_SLEEPIN_WAIT:
+          pwr_ = SLEEPING;
+          break;
+
+        case WAKING_SLEEPOUT_WAIT:
+          lcd_cmd(0x29); // DISP ON
+          deadline_ = now + 20;                                        // settle
+          pwr_ = WAKING_SETTLE_WAIT;
+          break;
+
+        case WAKING_SETTLE_WAIT:
+          tft_tx([&](){ tft_.fillScreen(TFT_BLACK); });
+          invalidate_visible_page_();
+          pwr_ = AWAKE;
+          break;
+      }
+    }
+  }
 
   // ---------- Grid helpers ----------
   void compute_grid_(){
@@ -227,15 +347,41 @@ private:
   }
 
   bool read_touch_(int16_t &x,int16_t &y){
+      // Ensure TFT is not using SPI (DMA or normal)
+  //tft_.dmaWait();        // no-op if DMA not active
+  //tft_.endWrite();       // make sure TFT has released SPI & CS
+
     bool pressed=false;
-    if (touch_irq_>=0){ pressed=(digitalRead(touch_irq_)==LOW); if(!pressed) return false; }
-    else { pressed=ts_.touched(); if(!pressed) return false; }
-    digitalWrite(tft_cs_, HIGH);
-    TS_Point p=ts_.getPoint();
+
+    if (touch_irq_>=0){
+      pressed=(digitalRead(touch_irq_)==LOW);
+      if(!pressed) return false;
+    } else {
+      // Serialize against any TFT DMA/writes
+      {
+        std::lock_guard<std::mutex> lk(spi_mtx_);
+      #ifdef TFT_eSPI_ENABLE_DMA
+        tft_.dmaWait();
+      #endif
+        // Ensure TFT is not holding the bus
+        tft_.endWrite();
+        pressed = ts_.touched();  // if this uses SPI on your lib, we're safe now
+      }
+      if (!pressed) return false;
+    }
+
+    TS_Point p;
+    if (!touch_read(p)) return false;
+
     if (p.z<5 || p.z>4095) return false;
-    const int RX0=200,RX1=3800, RY0=200,RY1=3800;
-    int16_t mx = map(p.y, RY0, RY1, 0, 480);
-    int16_t my = map(p.x, RX0, RX1, 0, 320);
+
+    static constexpr int RAW_X_MIN = 200;
+    static constexpr int RAW_X_MAX = 3800;
+    static constexpr int RAW_Y_MIN = 200;
+    static constexpr int RAW_Y_MAX = 3800;
+
+    int16_t mx = map(p.y, RAW_Y_MIN, RAW_Y_MAX, 0, 480);
+    int16_t my = map(p.x, RAW_X_MIN, RAW_X_MAX, 0, 320);
     x = std::max<int16_t>(0, std::min<int16_t>(479, mx));
     y = std::max<int16_t>(0, std::min<int16_t>(319, my));
     return true;
@@ -246,9 +392,10 @@ private:
     // Only grow; reuse if current is big enough.
     if (w <= scratch_w_ && h <= scratch_h_) return;
     scratch_.deleteSprite();
-    scratch_.createSprite(w, h);
-    scratch_w_ = w;
-    scratch_h_ = h;
+    scratch_.createSprite(std::max<int16_t>(scratch_w_, w), 
+                          std::max<int16_t>(scratch_h_, h));
+    scratch_w_ = std::max<int16_t>(scratch_w_, w);
+    scratch_h_ = std::max<int16_t>(scratch_h_, h);
   }
 };
 
