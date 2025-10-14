@@ -1,0 +1,105 @@
+esphome:
+  name: radio
+  friendly_name: ESP32S3 Radio
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 40MHz
+
+logger:
+  level: WARN
+
+api:
+web_server:
+  port: 80
+
+ota:
+  - platform: esphome
+    version: 2
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+
+# --- I²S bus ---
+i2s_audio:
+  id: i2s0
+  i2s_lrclk_pin: GPIO11      # LRCK / WS
+  i2s_bclk_pin:  GPIO10      # BCK / SCK
+  # i2s_mclk_pin: not needed
+
+# --- I²S speaker output (external DAC = PCM5102A) ---
+speaker:
+  - platform: i2s_audio
+    id: i2s_spk
+    dac_type: external
+    i2s_audio_id: i2s0
+    i2s_dout_pin: GPIO12     # DIN/SD on PCM5102A
+    channel: mono
+    i2s_comm_fmt: stand_i2s  # use standard I²S format
+  
+
+# --- Mixer joins announcement + media pipelines ---
+  - platform: mixer
+    id: mixer_spk
+    output_speaker: i2s_spk
+    source_speakers:
+      - id: announcement_spk
+      - id: media_spk
+
+# --- Media player using ESP-IDF “speaker” backend ---
+media_player:
+  - platform: speaker
+    id: s3_radio
+    name: "S3 I2S DAC"
+    codec_support_enabled: true
+    volume_initial: 100%
+
+    announcement_pipeline:
+      speaker: announcement_spk
+      format: MP3
+      num_channels: 1
+
+    media_pipeline:
+      speaker: media_spk
+      format: MP3
+      num_channels: 1
+
+# --- Buttons for control ---
+button:
+  - platform: template
+    name: "Play NPO Radio 2"
+    on_press:
+      - media_player.play_media:
+          id: s3_radio
+          media_url: http://icecast.omroep.nl/radio2-bb-mp3
+  - platform: template
+    name: "Play Q Music"
+    on_press:
+      - media_player.play_media:
+          id: s3_radio
+          media_url: https://stream.qmusic.nl/qmusic/mp3
+  - platform: template
+    name: "Play 538"
+    on_press:
+      - media_player.play_media:
+          id: s3_radio
+          media_url: http://mp3streams.nl/zender/radio-538
+  - platform: template
+    name: "Play Sky Radio"
+    on_press:
+      - media_player.play_media:
+          id: s3_radio
+          media_url: https://www.mp3streams.nl/zender/skyradio/stream/8-mp3-128
+
+  - platform: template
+    name: "Stop Playback"
+    on_press:
+      - media_player.stop:
+          id: s3_radio

@@ -1,0 +1,285 @@
+esphome:
+  name: radio
+  friendly_name: ESP32S3 Radio
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+logger:
+  level: WARN
+
+api:
+web_server:
+  port: 80
+
+ota:
+  - platform: esphome
+    version: 2
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# --- I²S bus to PCM5102A ---
+i2s_audio:
+  id: i2s0
+  i2s_bclk_pin:  GPIO10     # -> PCM5102A BCK / SCK
+  i2s_lrclk_pin: GPIO11     # -> PCM5102A LRCK / WS
+  # i2s_mclk_pin: not required (PCM5102A internal PLL)
+
+# --- Media player (Arduino path) ---
+media_player:
+  - platform: i2s_audio
+    id: s3_radio
+    name: "S3 I2S DAC"
+    dac_type: external
+    i2s_audio_id: i2s0
+    i2s_dout_pin: GPIO12    # -> PCM5102A DIN / SD
+    mode: stereo
+    internal: True
+
+# Optional: identify nicely; also needed for HTTPS on Arduino (no cert verify)
+http_request:
+  useragent: esphome-radio
+  verify_ssl: false
+
+globals:
+  - id: station_index
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: station_count
+    type: int
+    restore_value: no
+    initial_value: '3'
+
+  # Hold the resolved display name + url for the station we’re about to play
+  - id: current_name
+    type: std::string
+    restore_value: no
+    initial_value: '"Qmusic"'
+
+  - id: current_url
+    type: std::string
+    restore_value: no
+    initial_value: '"https://stream.qmusic.nl/qmusic/mp3"'
+
+text_sensor:
+  - platform: template
+    id: current_station
+    name: "Current Station"
+
+switch:
+  - platform: homeassistant
+    internal: False
+    name: "Stereo"
+    id: garage_stereo
+    entity_id: switch.garage_stereo
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: 17
+      mode: INPUT_PULLUP
+      inverted: True
+    name: "Radio Button"
+    internal: True
+    on_multi_click:
+      # Short press: play last if stopped, next if playing
+      - timing:
+          - ON for at most 350ms
+          - OFF for at least 50ms
+        then:
+          - script.execute: button_next
+      # Long press: stop
+      - timing:
+          - ON for at least 700ms
+        then:
+          - script.execute: button_stop
+
+
+script:
+  # Map index → name+url (in globals), publish name, then play via actions
+  - id: play_station_by_index
+    then:
+      - light.turn_on:
+          id: onboard_rgb
+          brightness: 50%
+          effect: Rainbow
+      - switch.turn_on: garage_stereo
+      - lambda: |-
+          switch (id(station_index)) {
+            case 0:
+              id(current_name) = "Qmusic";
+              id(current_url)  = "https://stream.qmusic.nl/qmusic/mp3";
+              break;
+            case 1:
+              id(current_name) = "Radio 538";
+              id(current_url)  = "https://www.mp3streams.nl/zender/radio-538/stream/4-mp3-128";
+              break;
+            case 2:
+              id(current_name) = "Sky Radio";
+              id(current_url)  = "https://www.mp3streams.nl/zender/skyradio/stream/8-mp3-128";
+              break;
+            default:
+              id(station_index) = 0;
+              id(current_name) = "Qmusic";
+              id(current_url)  = "https://stream.qmusic.nl/qmusic/mp3";
+              break;
+          }
+      - text_sensor.template.publish:
+          id: current_station
+          state: !lambda 'return id(current_name);'
+      - media_player.volume_set:
+          id: s3_radio
+          volume: 1.0            # 0.0–1.0; use 1.0 for 100%
+      - media_player.play_media:
+          id: s3_radio
+          media_url: !lambda 'return id(current_url);'
+      - component.update: oled_display
+
+  - id: play_last
+    then:
+      - script.execute: play_station_by_index
+
+  - id: next_station
+    then:
+      - lambda: |-
+          id(station_index) = (id(station_index) + 1) % id(station_count);
+      - script.execute: play_station_by_index
+
+  - id: button_next
+    then:
+    - if:
+        condition:
+          media_player.is_playing: s3_radio
+        then:
+          - script.execute: next_station
+        else:
+          - script.execute: play_last
+
+  - id: button_stop
+    then:
+    - if:
+        condition:
+          media_player.is_playing: s3_radio
+        then:
+          - script.execute: stop_radio
+        else:
+          - script.execute: play_last
+
+  - id: stop_radio
+    then:
+      - light.turn_off: onboard_rgb
+      - switch.turn_off: garage_stereo
+      - media_player.stop:
+          id: s3_radio
+      - text_sensor.template.publish:
+          id: current_station
+          state: !lambda 'return "";'
+      - component.update: oled_display
+
+# --- Buttons ---
+button:
+  - platform: template
+    name: "Play/Next"
+    on_press:
+      - script.execute: button_next
+
+  - platform: template
+    name: "Stop"
+    on_press:
+      - script.execute: stop_radio
+
+light:
+  - platform: neopixelbus
+    variant: ws2812
+    id: onboard_rgb
+    internal: True
+    name: "Onboard RGB"
+    pin: GPIO48          # <-- change if your board uses a different pin
+    num_leds: 1
+    type: GRB            # most WS2812 are GRB; use RGB if colors look wrong
+    method: ESP32_RMT_0  # IMPORTANT: avoid I2S method since you use I2S for audio
+    effects:
+      - addressable_rainbow:
+          name: "Rainbow"
+          speed: 10      # lower = slower cycle; try 5–20
+          width: 1
+
+font:
+  - file: "gfonts://Roboto"
+    id: small
+    size: 12
+  - file: "gfonts://Roboto"
+    id: large
+    size: 28
+
+i2c:
+  - id: bus_display
+    sda: GPIO15
+    scl: GPIO16
+    scan: false
+    frequency: 400kHz
+  - id: bus_sht
+    frequency: 100kHz
+    sda: 14
+    scl: 13
+    scan: true
+
+sensor:
+  - platform: aht10
+    variant: AHT20
+    i2c_id: bus_sht
+    address: 0x38
+    update_interval: 30s
+    temperature:
+      id: temperature
+      name: "Panel Temperature"
+    humidity:
+      id: humidity
+      name: "Panel Humidity"
+
+  - platform: bmp280_i2c
+    i2c_id: bus_sht
+    address: 0x77           # change to 0x77 if scan shows that instead
+    update_interval: 30s
+    pressure:
+      id: pressure
+      name: "Panel Pressure"
+
+time:
+  - platform: sntp
+    id: esptime
+    timezone: Europe/Amsterdam
+
+display:
+  - platform: ssd1306_i2c
+    i2c_id: bus_display
+    model: "SSD1306 128x64"
+    id: oled_display
+    address: 0x3C
+    update_interval: 2s
+    lambda: |-
+      if ((id(current_station).state.empty())) {
+        
+        return;
+      }
+
+      // Header: temp & humidity
+      it.printf(0,   0,   id(small), TextAlign::TOP_LEFT,  "%.1f°C", id(temperature).state);
+      it.printf(127, 0,   id(small), TextAlign::TOP_RIGHT, "%.0f%%", id(humidity).state);
+
+      const int y_header_line = 13;   // just below header line of small font
+      const int y_footer_line = 51;   // just above the bottom text band
+      it.line(0, y_header_line, 127, y_header_line);
+      it.line(0, y_footer_line, 127, y_footer_line);
+
+      it.printf(64, 31, id(large), TextAlign::CENTER, "%s", id(current_station).state.c_str());
+
+      // Footer: date & time
+      it.strftime(0,   64, id(small), TextAlign::BOTTOM_LEFT,  "%d/%m", id(esptime).now());
+      it.strftime(127, 64, id(small), TextAlign::BOTTOM_RIGHT, "%H:%M", id(esptime).now());
