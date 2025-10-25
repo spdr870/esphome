@@ -58,12 +58,12 @@ globals:
   - id: disconnected_hum_level_max_speed
     type: int
     restore_value: no
-    initial_value: "85"
+    initial_value: "95"
   # Disconnected Mode Medium Fan Speed Threshold
   - id: disconnected_hum_level_medium_speed
     type: int
     restore_value: no
-    initial_value: "75"
+    initial_value: "90"
   # 0=Auto,1=Low,2=Medium,3=High
   - id: fan_mode_idx
     type: int
@@ -169,7 +169,7 @@ script:
         id: open_air_mini
         speed: !lambda |-
           auto hum = id(open_air_mini_sensor_1_humidity).state;
-          auto co2 = id(open_air_mini_sensor_1_co2).state;
+          auto co2_value = id(open_air_mini_sensor_1_co2).state;
           auto currentfan = id(air_mini_rpm).state;
 
           if (currentfan < 50 /* If the fan is not spinning, force high speed to start it */ ) {
@@ -183,9 +183,9 @@ script:
           if (mode == 3) return 80;
 
           // ---- CO2 based desired speed (10–50%) ----
-          float co2_value = ((co2 - 450.0f) / 1200.0f) * 100.0f;
-          if (co2_value < 10.0f) co2_value = 10.0f;
-          if (co2_value > 50.0f) co2_value = 50.0f;
+          float co2_based_fan_speed  = ((co2_value - 450.0f) / 1200.0f) * 100.0f;
+          if (co2_based_fan_speed  < 10.0f) co2_based_fan_speed  = 10.0f;
+          if (co2_based_fan_speed  > 50.0f) co2_based_fan_speed  = 50.0f;
 
           // ---- Humidity based discrete speeds ----
           int hum_speed = id(disconnected_default_fan_speed);
@@ -196,12 +196,12 @@ script:
           }
 
           // ---- Max of both ----
-          float final_speed = std::max(co2_value, (float)hum_speed);
+          float final_speed = std::max(co2_based_fan_speed , (float)hum_speed);
 
           // Apply speed floor (for night cooling)
           final_speed = std::max(final_speed, (float) id(min_speed_floor));
 
-          ESP_LOGD("disconnected_mode", "CO2 speed=%.1f, HUM speed=%d, final=%.1f", co2_value, hum_speed, final_speed);
+          ESP_LOGD("disconnected_mode", "CO2 speed=%.1f, HUM speed=%d, final=%.1f", co2_based_fan_speed , hum_speed, final_speed);
 
           return (int)final_speed;
 - id: publish_mode_states
