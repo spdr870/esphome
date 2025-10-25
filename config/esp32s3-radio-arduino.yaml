@@ -7,6 +7,10 @@ esp32:
   framework:
     type: arduino
 
+psram:
+  mode: octal
+  speed: 40MHz
+
 logger:
   level: WARN
 
@@ -21,6 +25,14 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+
+  on_connect:
+    then:
+      - component.update: oled_display
+
+  on_disconnect:
+    then:
+      - component.update: oled_display
 
 # --- I²S bus to PCM5102A ---
 i2s_audio:
@@ -51,21 +63,16 @@ globals:
     restore_value: true
     initial_value: '0'
 
-  - id: station_count
-    type: int
-    restore_value: no
-    initial_value: '3'
-
   # Hold the resolved display name + url for the station we’re about to play
   - id: current_name
     type: std::string
     restore_value: no
-    initial_value: '"Qmusic"'
+    initial_value: '""'
 
   - id: current_url
     type: std::string
     restore_value: no
-    initial_value: '"https://stream.qmusic.nl/qmusic/mp3"'
+    initial_value: '""'
 
 text_sensor:
   - platform: template
@@ -111,25 +118,25 @@ script:
           effect: Rainbow
       - switch.turn_on: garage_stereo
       - lambda: |-
-          switch (id(station_index)) {
-            case 0:
-              id(current_name) = "Qmusic";
-              id(current_url)  = "https://stream.qmusic.nl/qmusic/mp3";
-              break;
-            case 1:
-              id(current_name) = "Radio 538";
-              id(current_url)  = "https://www.mp3streams.nl/zender/radio-538/stream/4-mp3-128";
-              break;
-            case 2:
-              id(current_name) = "Sky Radio";
-              id(current_url)  = "https://www.mp3streams.nl/zender/skyradio/stream/8-mp3-128";
-              break;
-            default:
-              id(station_index) = 0;
-              id(current_name) = "Qmusic";
-              id(current_url)  = "https://stream.qmusic.nl/qmusic/mp3";
-              break;
+          static const struct {
+            const char* name;
+            const char* url;
+          } stations[] = {
+            { "Qmusic",   "https://stream.qmusic.nl/qmusic/mp3" },
+            { "Radio 538","https://www.mp3streams.nl/zender/radio-538/stream/4-mp3-128" },
+            { "Sky Radio","https://www.mp3streams.nl/zender/skyradio/stream/8-mp3-128" },
+          };
+
+          int index = id(station_index);
+
+          // Clamp to valid range
+          if (index < 0 || index >= (int)(sizeof(stations)/sizeof(stations[0]))) {
+            index = 0;
+            id(station_index) = 0;
           }
+
+          id(current_name) = stations[index].name;
+          id(current_url)  = stations[index].url;
       - text_sensor.template.publish:
           id: current_station
           state: !lambda 'return id(current_name);'
@@ -148,7 +155,7 @@ script:
   - id: next_station
     then:
       - lambda: |-
-          id(station_index) = (id(station_index) + 1) % id(station_count);
+          id(station_index)++;
       - script.execute: play_station_by_index
 
   - id: button_next
@@ -173,10 +180,15 @@ script:
 
   - id: stop_radio
     then:
+      - text_sensor.template.publish:
+          id: current_station
+          state: !lambda 'return "BYE!";'
+      - component.update: oled_display
       - light.turn_off: onboard_rgb
-      - switch.turn_off: garage_stereo
       - media_player.stop:
           id: s3_radio
+      - switch.turn_off: garage_stereo
+      - delay: 1000ms
       - text_sensor.template.publish:
           id: current_station
           state: !lambda 'return "";'
@@ -200,14 +212,14 @@ light:
     id: onboard_rgb
     internal: True
     name: "Onboard RGB"
-    pin: GPIO48          # <-- change if your board uses a different pin
+    pin: GPIO48
     num_leds: 1
-    type: GRB            # most WS2812 are GRB; use RGB if colors look wrong
-    method: ESP32_RMT_0  # IMPORTANT: avoid I2S method since you use I2S for audio
+    type: GRB
+    method: ESP32_RMT_0
     effects:
       - addressable_rainbow:
           name: "Rainbow"
-          speed: 10      # lower = slower cycle; try 5–20
+          speed: 10      # lower = slower
           width: 1
 
 font:
@@ -245,7 +257,7 @@ sensor:
 
   - platform: bmp280_i2c
     i2c_id: bus_sht
-    address: 0x77           # change to 0x77 if scan shows that instead
+    address: 0x77
     update_interval: 30s
     pressure:
       id: pressure
@@ -262,10 +274,13 @@ display:
     model: "SSD1306 128x64"
     id: oled_display
     address: 0x3C
-    update_interval: 2s
+    update_interval: 4s
     lambda: |-
+      if (!WiFi.isConnected()) {
+        it.printf(64, 0, id(small), TextAlign::TOP_CENTER, "no wifi");
+      }
+
       if ((id(current_station).state.empty())) {
-        
         return;
       }
 
