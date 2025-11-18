@@ -112,6 +112,11 @@ globals:
     restore_value: no
     initial_value: 'false'
 
+  - id: in_selecting_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
   - id: menu_station_index
     type: int
     restore_value: no
@@ -126,6 +131,11 @@ globals:
     type: int
     restore_value: no
     initial_value: '1000'
+
+  - id: selecting_blink_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 text_sensor:
   - platform: template
@@ -151,7 +161,6 @@ binary_sensor:
     internal: true
     filters:
       - settle: 15ms
-      #- delayed_on: 50ms     # must stay pressed ≥x ms to register
       - delayed_off: 30ms     # avoid quick release glitches
     on_press:
       then:
@@ -257,39 +266,55 @@ script:
     then:
       - if:
           condition:
-            lambda: 'return id(in_menu_mode);'
+            lambda: 'return id(in_selecting_mode);'
           then:
-            # Already in menu mode - navigate to next station
-            - script.execute: menu_next_station
+            # In selecting mode - go back to menu mode
+            - script.stop: selecting_timer
+            - lambda: |-
+                id(in_selecting_mode) = false;
+                id(in_menu_mode) = true;
+                id(menu_station_index) = (id(menu_station_index) + 1) % NUM_STATIONS;
+                id(menu_timeout_time) = millis() + id(menu_timeout_ms);
+            - component.update: oled_display
+            - script.execute: menu_timeout_watcher
           else:
-            # Check if radio is off, if so turn it on first
             - if:
                 condition:
-                  not:
-                    or:
-                      - media_player.is_playing: s3_radio
-                      - media_player.is_on: s3_radio
+                  lambda: 'return id(in_menu_mode);'
                 then:
-                  # Radio is off - turn it on with last station
-                  - media_player.turn_on:
-                      id: s3_radio
-                  - text_sensor.template.publish:
-                      id: current_station
-                      state: !lambda 'return "HELLO";'
-                  - component.update: oled_display
-                  - delay: 250ms
-                  - script.execute: play_station_by_index
+                  # Already in menu mode - navigate to next station
+                  - script.execute: menu_next_station
                 else:
-                  # Radio is on - enter menu mode
-                  - lambda: |-
-                      id(in_menu_mode) = true;
-                      id(menu_station_index) = id(station_index);
-                      id(menu_timeout_time) = millis() + id(menu_timeout_ms);
-                  - component.update: oled_display
-                  - script.execute: menu_timeout_watcher
+                  # Check if radio is off, if so turn it on first
+                  - if:
+                      condition:
+                        not:
+                          or:
+                            - media_player.is_playing: s3_radio
+                            - media_player.is_on: s3_radio
+                      then:
+                        # Radio is off - turn it on with last station
+                        - media_player.turn_on:
+                            id: s3_radio
+                        - text_sensor.template.publish:
+                            id: current_station
+                            state: !lambda 'return "HELLO";'
+                        - component.update: oled_display
+                        - delay: 250ms
+                        - script.execute: play_station_by_index
+                      else:
+                        # Radio is on - enter menu mode
+                        - lambda: |-
+                            id(in_menu_mode) = true;
+                        - script.execute: menu_next_station
+                        - script.execute: menu_timeout_watcher
 
   - id: menu_next_station
     then:
+      - light.turn_on:
+          id: status_led
+          brightness: 30%
+          effect: "none"
       - lambda: |-
           id(menu_station_index) = (id(menu_station_index) + 1) % NUM_STATIONS;
           id(menu_timeout_time) = millis() + id(menu_timeout_ms);
@@ -300,21 +325,36 @@ script:
     then:
       - while:
           condition:
-            lambda: 'return id(in_menu_mode);'
+            lambda: 'return id(in_menu_mode) && millis() < id(menu_timeout_time);'
           then:
             - delay: 100ms
-            - lambda: |-
-                if (millis() >= id(menu_timeout_time)) {
-                  id(in_menu_mode) = false;
-                  // Change to selected station if different
-                  if (id(menu_station_index) != id(station_index)) {
-                    id(station_index) = id(menu_station_index);
-                    id(play_station_by_index).execute();
-                  } else {
-                    // Just update display to show current station in large font
-                    id(oled_display).update();
-                  }
-                }
+      # Enter selecting mode (visual feedback only)
+      - lambda: |-
+          id(in_menu_mode) = false;
+          id(in_selecting_mode) = true;
+          id(selecting_blink_state) = true;
+      - script.execute: selecting_timer
+      - lambda: |-
+          // Change station immediately
+          if (id(menu_station_index) != id(station_index)) {
+            id(station_index) = id(menu_station_index);
+            id(play_station_by_index).execute();
+          }
+
+  - id: selecting_timer
+    mode: restart
+    then:
+      # Blink for 3 seconds
+      - repeat:
+          count: 6
+          then:
+            - lambda: 'id(selecting_blink_state) = !id(selecting_blink_state);'
+            - component.update: oled_display
+            - delay: 500ms
+      # After blinking, just exit selecting mode (station already changed)
+      - lambda: |-
+          id(in_selecting_mode) = false;
+      - component.update: oled_display
 
   - id: exit_menu
     then:
@@ -333,10 +373,6 @@ script:
           id: status_led
           brightness: 30%
           effect: "none"
-      #- light.turn_on:
-      #    id: onboard_rgb
-      #    brightness: 50%
-       #   effect: Rainbow
       - switch.turn_on: garage_stereo
       - lambda: |-
           int index = id(station_index);
@@ -438,7 +474,10 @@ font:
     size: 12
   - file: "gfonts://Roboto"
     id: menuheaderfont
-    size: 15
+    size: 13
+  - file: "gfonts://PT Sans Narrow" # "gfonts://Roboto Condensed"
+    id: menufont
+    size: 18
   - file: "gfonts://Roboto"
     id: large
     size: 28
@@ -490,16 +529,19 @@ display:
       const int y_header_line = 13;
       const int y_footer_line = 51;
       
-      // Check if in menu mode
-      if (id(in_menu_mode)) {
+      // Check if in menu mode or selecting mode
+      if (id(in_menu_mode) || id(in_selecting_mode)) {
         // Menu mode - show all stations in two columns
         const int col_width = 64;
-        const int menu_font_size = 12;
+        const int menu_font_size = 18;
         const int start_y = 16;  // Start below 16px header with padding
         const int line_height = menu_font_size + 2;  // Increased for larger font
         
-        // Display header
-        it.printf(64, 0, id(menuheaderfont), TextAlign::TOP_CENTER, "Select Station");
+        // Draw solid header background (full width, 16px high)
+        it.filled_rectangle(0, 0, 128, 16);
+        
+        // Display header with inverted text
+        it.print(64, 0, id(menuheaderfont), COLOR_OFF, TextAlign::TOP_CENTER, "= SELECT STATION =");
 
         //it.line(0, y_header_line, 127, y_header_line);
 
@@ -511,21 +553,41 @@ display:
           int y = start_y + row * line_height;
           
           // Draw filled rectangle background for current selection
-          if (i == id(menu_station_index)) {
+          bool is_selected = i == id(menu_station_index);
+          bool show_highlight = is_selected && (!id(in_selecting_mode) || id(selecting_blink_state));
+          
+          if (show_highlight) {
             // Fixed rectangle size based on column width
-            int rect_width = col_width - 4;  // Leave 2px margin on each side
-            int rect_height = 14;
-            int rect_x = col * col_width + 2;
+            int rect_width = col_width;
+            int rect_height = menu_font_size + 2;
+            int rect_x = col * col_width;
             int rect_y = y;
             
             // Draw filled rectangle
             it.filled_rectangle(rect_x, rect_y, rect_width, rect_height);
             
+            // Top-left corner
+            it.draw_pixel_at(rect_x, rect_y, COLOR_OFF);
+            it.draw_pixel_at(rect_x + 1, rect_y, COLOR_OFF);
+            it.draw_pixel_at(rect_x, rect_y + 1, COLOR_OFF);
+            // Top-right corner
+            it.draw_pixel_at(rect_x + rect_width - 1, rect_y, COLOR_OFF);
+            it.draw_pixel_at(rect_x + rect_width - 2, rect_y, COLOR_OFF);
+            it.draw_pixel_at(rect_x + rect_width - 1, rect_y + 1, COLOR_OFF);
+            // Bottom-left corner
+            it.draw_pixel_at(rect_x, rect_y + rect_height - 1, COLOR_OFF);
+            it.draw_pixel_at(rect_x + 1, rect_y + rect_height - 1, COLOR_OFF);
+            it.draw_pixel_at(rect_x, rect_y + rect_height - 2, COLOR_OFF);
+            // Bottom-right corner
+            it.draw_pixel_at(rect_x + rect_width - 1, rect_y + rect_height - 1, COLOR_OFF);
+            it.draw_pixel_at(rect_x + rect_width - 2, rect_y + rect_height - 1, COLOR_OFF);
+            it.draw_pixel_at(rect_x + rect_width - 1, rect_y + rect_height - 2, COLOR_OFF);
+
             // Draw text in black (inverted for white background)
-            it.print(x, y, id(small), COLOR_OFF, TextAlign::TOP_CENTER, STATIONS[i].name);
+            it.print(x, y - 3, id(menufont), COLOR_OFF, TextAlign::TOP_CENTER, STATIONS[i].name);
           } else {
             // Normal white text
-            it.printf(x, y, id(small), TextAlign::TOP_CENTER, "%s", STATIONS[i].name);
+            it.printf(x, y - 3, id(menufont), TextAlign::TOP_CENTER, STATIONS[i].name);
           }
         }
         
