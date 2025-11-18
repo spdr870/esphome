@@ -440,9 +440,6 @@ font:
     id: menuheaderfont
     size: 15
   - file: "gfonts://Roboto"
-    id: menufont
-    size: 12
-  - file: "gfonts://Roboto"
     id: large
     size: 28
 
@@ -525,10 +522,10 @@ display:
             it.filled_rectangle(rect_x, rect_y, rect_width, rect_height);
             
             // Draw text in black (inverted for white background)
-            it.print(x, y, id(menufont), COLOR_OFF, TextAlign::TOP_CENTER, STATIONS[i].name);
+            it.print(x, y, id(small), COLOR_OFF, TextAlign::TOP_CENTER, STATIONS[i].name);
           } else {
             // Normal white text
-            it.printf(x, y, id(menufont), TextAlign::TOP_CENTER, "%s", STATIONS[i].name);
+            it.printf(x, y, id(small), TextAlign::TOP_CENTER, "%s", STATIONS[i].name);
           }
         }
         
