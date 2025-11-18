@@ -8,18 +8,154 @@ esp32:
     type: esp-idf
 
 i2c:
+- id: bus_display
+  sda: GPIO16
+  scl: GPIO19
+  scan: false
+- id: bus_a
+  frequency: 400kHz
   sda: 21
   scl: 22
   scan: true
-  id: bus_a
+
+globals:
+  - id: co2_level
+    type: int
+  - id: presence_start_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+font:
+  - file: "gfonts://Roboto"
+    id: small
+    size: 12
+  - file: "gfonts://Roboto"
+    id: large
+    size: 28
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            binary_sensor.is_on: pir_motion
+          then:
+            - component.update: oled_display
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            not:
+              binary_sensor.is_on: pir_motion
+          then:
+            - component.update: oled_display
+
+
+display:
+  - platform: ssd1306_i2c
+    i2c_id: bus_display
+    model: "SSD1306 128x64"
+    id: oled_display
+    address: 0x3C
+    update_interval: never
+    lambda: |-
+      if (!id(pir_motion).state) return;
+
+      // Compute how long presence has been detected
+      unsigned long elapsed_ms = millis() - id(presence_start_time);
+      unsigned long seconds = elapsed_ms / 1000;
+      unsigned long minutes = seconds / 60;
+      unsigned long hours   = minutes / 60;
+
+      if (seconds < 60) {
+        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu sec", seconds);
+      } else if (minutes < 2) {
+        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu:%02lu min", minutes, seconds % 60);
+      } else if (minutes < 60) {
+        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu min", minutes);
+      } else {
+        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu:%02lu hrs", hours, minutes % 60);
+      }
+
+      it.printf(0, 0, id(small), TextAlign::TOP_LEFT, "CO2");
+      it.printf(127, 0, id(large), TextAlign::TOP_RIGHT, "%d", id(co2_level));
+
+number:
+  - platform: template
+    name: "Set CO2 Level"
+    id: co2_level_setter
+    optimistic: true
+    min_value: 400
+    max_value: 2500
+    step: 1
+    set_action:
+      - lambda: |-
+          id(co2_level) = (int)x;
+          ESP_LOGI("main", "CO2 level manually set to %d", id(co2_level));
+
+binary_sensor:
+  - platform: gpio
+    id: pir_motion
+    name: "Radar Presence"
+    pin:
+      number: GPIO17
+    device_class: motion
+    filters:
+      - delayed_off: 1s
+      - delayed_on: 250ms
+    on_press:
+      - lambda: |-
+          // Store the current time in milliseconds
+          id(presence_start_time) = millis();
+    on_release:
+      - lambda: |-
+          // Reset timer when presence ends
+          id(presence_start_time) = 0;
 
 sensor:
+  - platform: template
+    id: co2_level_sensor
+    name: "CO2 Level"
+    lambda: |-
+      return id(co2_level);
+    update_interval: 10s  # how often to check
+
+    on_value:
+      then:
+        - lambda: |-
+            const float v = id(co2_level);
+            float r = 0.0f;
+
+            if (v < 1200.0f) {
+              r = 0.0f;
+            } else if (v < 2100.0f) {
+              r = (v - 1200.0f) / 900.0f * 1.0f;
+            } else {
+              r = 1.0f;
+            }
+
+            // Small deadband to avoid tiny updates & flicker
+            if (r < 0.02f) {
+              id(led_red).turn_off();                        // truly off near zero
+            } else {
+              id(led_red).set_level(r);
+            }
+
+
   - platform: scd4x
     i2c_id: bus_a
     address: 0x62
     update_interval: 60s
     co2:
       name: "CO2"
+      id: co2_ppm
+      on_value:
+        then:
+          - lambda: |-
+              const float v = id(co2_ppm).state;
+              id(co2_level) = v;
+
     temperature:
       name: "CO2 Sensor Temperature"
     humidity:
@@ -44,3 +180,15 @@ web_server:
 ota:
   - platform: esphome
     version: 2
+
+output:
+  - platform: ledc
+    pin: GPIO18
+    id: led_red
+
+light:
+  - platform: monochromatic
+    output: led_red
+    name: "Red led"
+    id: red
+    default_transition_length: 1.5s

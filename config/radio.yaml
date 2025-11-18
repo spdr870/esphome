@@ -1,6 +1,8 @@
 esphome:
   name: radio
   friendly_name: ESP32S3 Radio
+  includes:
+    - radio_stations.h
   on_boot:
     then:
       - light.turn_on:
@@ -16,8 +18,6 @@ esp32:
 psram:
   mode: octal
   speed: 40MHz
-
-
 
 logger:
   level: WARN
@@ -71,10 +71,9 @@ media_player:
   - platform: speaker
     id: s3_radio
     name: "S3 I2S DAC"
-    buffer_size: 1000000
+    buffer_size: 800000
     codec_support_enabled: true
     task_stack_in_psram: false
-    #internal: true
     volume_initial: 100%
 
     announcement_pipeline:
@@ -107,6 +106,26 @@ globals:
     type: std::string
     restore_value: no
     initial_value: '""'
+
+  - id: in_menu_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: menu_station_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: menu_timeout_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+  - id: menu_timeout_ms
+    type: int
+    restore_value: no
+    initial_value: '1000'
 
 text_sensor:
   - platform: template
@@ -148,6 +167,7 @@ output:
 
 light:
   - platform: monochromatic
+    internal: True
     name: "Status LED"
     output: led_pwm
     id: status_led
@@ -156,7 +176,7 @@ light:
       - pulse:
           name: "Slow Pulse"
           transition_length: 2s
-          update_interval: 4s
+          update_interval: 2s
           min_brightness: 0%
           max_brightness: 20%
       - strobe:
@@ -169,6 +189,7 @@ light:
               duration: 100ms
   - platform: esp32_rmt_led_strip
     id: onboard_rgb
+    internal: True
     name: "Onboard RGB"
     pin: GPIO48
     num_leds: 1
@@ -208,7 +229,7 @@ script:
           if (held < 700) {
             // Short press
             ESP_LOGI("button", "Short press: %lu ms", held);
-            id(button_next).execute();
+            id(button_short_press).execute();
           }
           else
           {
@@ -231,6 +252,81 @@ script:
                 id: current_station
                 state: !lambda 'return "BYE!";'
             - component.update: oled_display
+
+  - id: button_short_press
+    then:
+      - if:
+          condition:
+            lambda: 'return id(in_menu_mode);'
+          then:
+            # Already in menu mode - navigate to next station
+            - script.execute: menu_next_station
+          else:
+            # Check if radio is off, if so turn it on first
+            - if:
+                condition:
+                  not:
+                    or:
+                      - media_player.is_playing: s3_radio
+                      - media_player.is_on: s3_radio
+                then:
+                  # Radio is off - turn it on with last station
+                  - media_player.turn_on:
+                      id: s3_radio
+                  - text_sensor.template.publish:
+                      id: current_station
+                      state: !lambda 'return "HELLO";'
+                  - component.update: oled_display
+                  - delay: 250ms
+                  - script.execute: play_station_by_index
+                else:
+                  # Radio is on - enter menu mode
+                  - lambda: |-
+                      id(in_menu_mode) = true;
+                      id(menu_station_index) = id(station_index);
+                      id(menu_timeout_time) = millis() + id(menu_timeout_ms);
+                  - component.update: oled_display
+                  - script.execute: menu_timeout_watcher
+
+  - id: menu_next_station
+    then:
+      - lambda: |-
+          id(menu_station_index) = (id(menu_station_index) + 1) % NUM_STATIONS;
+          id(menu_timeout_time) = millis() + id(menu_timeout_ms);
+      - component.update: oled_display
+
+  - id: menu_timeout_watcher
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: 'return id(in_menu_mode);'
+          then:
+            - delay: 100ms
+            - lambda: |-
+                if (millis() >= id(menu_timeout_time)) {
+                  id(in_menu_mode) = false;
+                  // Change to selected station if different
+                  if (id(menu_station_index) != id(station_index)) {
+                    id(station_index) = id(menu_station_index);
+                    id(play_station_by_index).execute();
+                  } else {
+                    // Just update display to show current station in large font
+                    id(oled_display).update();
+                  }
+                }
+
+  - id: exit_menu
+    then:
+      - lambda: |-
+          id(in_menu_mode) = false;
+          // Change to selected station if different
+          if (id(menu_station_index) != id(station_index)) {
+            id(station_index) = id(menu_station_index);
+            id(play_station_by_index).execute();
+          }
+      - component.update: oled_display
+
   - id: play_station_by_index
     then:
       - light.turn_on:
@@ -243,23 +339,13 @@ script:
        #   effect: Rainbow
       - switch.turn_on: garage_stereo
       - lambda: |-
-          static const struct {
-            const char* name;
-            const char* url;
-          } stations[] = {
-            { "Qmusic",   "https://stream.qmusic.nl/qmusic/mp3" },
-            { "Radio 538","https://www.mp3streams.nl/zender/radio-538/stream/4-mp3-128" },
-            { "Sky Radio","https://www.mp3streams.nl/zender/skyradio/stream/8-mp3-128" },
-            { "Veronica", "https://www.mp3streams.nl/zender/veronica/stream/11-mp3-128" },
-          };
-
           int index = id(station_index);
-          if (index < 0 || index >= (int)(sizeof(stations)/sizeof(stations[0]))) {
+          if (index < 0 || index >= NUM_STATIONS) {
             index = 0;
             id(station_index) = index;
           }
-          id(current_name) = stations[index].name;
-          id(current_url)  = stations[index].url;
+          id(current_name) = STATIONS[index].name;
+          id(current_url)  = STATIONS[index].url;
 
       - text_sensor.template.publish:
           id: current_station
@@ -351,6 +437,12 @@ font:
     id: small
     size: 12
   - file: "gfonts://Roboto"
+    id: menuheaderfont
+    size: 15
+  - file: "gfonts://Roboto"
+    id: menufont
+    size: 12
+  - file: "gfonts://Roboto"
     id: large
     size: 28
 
@@ -398,17 +490,63 @@ display:
     address: 0x3C
     update_interval: 4s
     lambda: |-
+      const int y_header_line = 13;
+      const int y_footer_line = 51;
+      
+      // Check if in menu mode
+      if (id(in_menu_mode)) {
+        // Menu mode - show all stations in two columns
+        const int col_width = 64;
+        const int menu_font_size = 12;
+        const int start_y = 16;  // Start below 16px header with padding
+        const int line_height = menu_font_size + 2;  // Increased for larger font
+        
+        // Display header
+        it.printf(64, 0, id(menuheaderfont), TextAlign::TOP_CENTER, "Select Station");
+
+        //it.line(0, y_header_line, 127, y_header_line);
+
+        // Display stations in two columns
+        for (int i = 0; i < NUM_STATIONS; i++) {
+          int col = i % 2;
+          int row = i / 2;
+          int x = col * col_width + col_width / 2;
+          int y = start_y + row * line_height;
+          
+          // Draw filled rectangle background for current selection
+          if (i == id(menu_station_index)) {
+            // Fixed rectangle size based on column width
+            int rect_width = col_width - 4;  // Leave 2px margin on each side
+            int rect_height = 14;
+            int rect_x = col * col_width + 2;
+            int rect_y = y;
+            
+            // Draw filled rectangle
+            it.filled_rectangle(rect_x, rect_y, rect_width, rect_height);
+            
+            // Draw text in black (inverted for white background)
+            it.print(x, y, id(menufont), COLOR_OFF, TextAlign::TOP_CENTER, STATIONS[i].name);
+          } else {
+            // Normal white text
+            it.printf(x, y, id(menufont), TextAlign::TOP_CENTER, "%s", STATIONS[i].name);
+          }
+        }
+        
+        return;
+      }
+
       if (!esphome::wifi::global_wifi_component->is_connected()) {
         it.printf(64, 0, id(small), TextAlign::TOP_CENTER, "no wifi");
       }
       
+      // Normal mode - show current station in large font
       if ((id(current_station).state.empty())) {
         return;
       }
+
       it.printf(0,   0,   id(small), TextAlign::TOP_LEFT,  "%.1f°C", id(temperature).state);
       it.printf(127, 0,   id(small), TextAlign::TOP_RIGHT, "%.0f%%", id(humidity).state);
-      const int y_header_line = 13;
-      const int y_footer_line = 51;
+
       it.line(0, y_header_line, 127, y_header_line);
       it.line(0, y_footer_line, 127, y_footer_line);
       it.printf(64, 31, id(large), TextAlign::CENTER, "%s", id(current_station).state.c_str());
