@@ -1,0 +1,651 @@
+esphome:
+  name: servo
+  friendly_name: Servo
+  includes:
+    - maze_maps.h
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: load_random_map
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: WARN
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+  ap:
+    ssid: "Devboard Fallback Hotspot"
+
+api:
+
+web_server:
+  port: 80
+
+ota:
+  - platform: esphome
+    version: 2
+
+# -----------------------------
+# GLOBAL VARIABLES
+# -----------------------------
+
+globals:
+  - id: player_x
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  - id: player_y
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  - id: current_map
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  - id: map_marker1_x
+    type: int
+    restore_value: no
+    initial_value: '1'
+  
+  - id: map_marker1_y
+    type: int
+    restore_value: no
+    initial_value: '2'
+  
+  - id: map_marker2_x
+    type: int
+    restore_value: no
+    initial_value: '4'
+  
+  - id: map_marker2_y
+    type: int
+    restore_value: no
+    initial_value: '3'
+  
+  - id: map_end_x
+    type: int
+    restore_value: no
+    initial_value: '5'
+  
+  - id: map_end_y
+    type: int
+    restore_value: no
+    initial_value: '5'
+  
+  - id: last_potentiometer_angle
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  - id: is_dead
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+# Helper script to check if move is valid
+script:
+  - id: load_random_map
+    then:
+      - lambda: |-
+          // Select random map (1-9) using esp_random
+          int map_num = (esp_random() % 9) + 1;
+          id(current_map) = map_num;
+          
+          // Get the map layout based on map_num
+          const char (*current_layout)[14] = nullptr;
+          
+          switch(map_num) {
+            case 1: current_layout = MazeMaps::map1_layout; break;
+            case 2: current_layout = MazeMaps::map2_layout; break;
+            case 3: current_layout = MazeMaps::map3_layout; break;
+            case 4: current_layout = MazeMaps::map4_layout; break;
+            case 5: current_layout = MazeMaps::map5_layout; break;
+            case 6: current_layout = MazeMaps::map6_layout; break;
+            case 7: current_layout = MazeMaps::map7_layout; break;
+            case 8: current_layout = MazeMaps::map8_layout; break;
+            case 9: current_layout = MazeMaps::map9_layout; break;
+            default: current_layout = MazeMaps::map1_layout; break;
+          }
+          
+          // Parse marker positions from the layout
+          int m1x = 1, m1y = 2, m2x = 4, m2y = 3;
+          MazeMaps::parse_map(current_layout, m1x, m1y, m2x, m2y);
+          
+          // Store marker positions
+          id(map_marker1_x) = m1x;
+          id(map_marker1_y) = m1y;
+          id(map_marker2_x) = m2x;
+          id(map_marker2_y) = m2y;
+          
+          // Find all valid empty cells (not marker positions)
+          int valid_cells[36][2];  // Max 36 cells in 6x6 grid
+          int valid_count = 0;
+          
+          for (int y = 0; y < 6; y++) {
+            for (int x = 0; x < 6; x++) {
+              // Skip marker positions
+              if ((x == m1x && y == m1y) || (x == m2x && y == m2y)) {
+                continue;
+              }
+              valid_cells[valid_count][0] = x;
+              valid_cells[valid_count][1] = y;
+              valid_count++;
+            }
+          }
+          
+          // Reset death state
+          id(is_dead) = false;
+          
+          // Randomly select player position
+          int player_idx = esp_random() % valid_count;
+          int px = valid_cells[player_idx][0];
+          int py = valid_cells[player_idx][1];
+          id(player_x) = px;
+          id(player_y) = py;
+          
+          // Randomly select end position (at least 4 cols and 4 rows apart from player)
+          int end_idx;
+          int ex, ey;
+          int dx, dy;
+          int attempts = 0;
+          do {
+            end_idx = esp_random() % valid_count;
+            ex = valid_cells[end_idx][0];
+            ey = valid_cells[end_idx][1];
+            dx = (px > ex) ? (px - ex) : (ex - px);
+            dy = (py > ey) ? (py - ey) : (ey - py);
+            attempts++;
+            // Must be at least 4 apart in both x and y, or try 100 times then give up
+          } while ((dx < 4 || dy < 4) && attempts < 100);
+          
+          id(map_end_x) = ex;
+          id(map_end_y) = ey;
+  
+  - id: check_move
+    parameters:
+      new_x: int
+      new_y: int
+    then:
+      - lambda: |-
+          int x = new_x;
+          int y = new_y;
+          int old_x = id(player_x);
+          int old_y = id(player_y);
+          int map_num = id(current_map);
+          
+          // Check bounds
+          if (x < 0 || x > 5 || y < 0 || y > 5 || map_num <= 0) return;
+          
+          // Get the current map layout
+          const char (*current_layout)[14] = nullptr;
+          
+          switch(map_num) {
+            case 1: current_layout = MazeMaps::map1_layout; break;
+            case 2: current_layout = MazeMaps::map2_layout; break;
+            case 3: current_layout = MazeMaps::map3_layout; break;
+            case 4: current_layout = MazeMaps::map4_layout; break;
+            case 5: current_layout = MazeMaps::map5_layout; break;
+            case 6: current_layout = MazeMaps::map6_layout; break;
+            case 7: current_layout = MazeMaps::map7_layout; break;
+            case 8: current_layout = MazeMaps::map8_layout; break;
+            case 9: current_layout = MazeMaps::map9_layout; break;
+            default: current_layout = MazeMaps::map1_layout; break;
+          }
+          
+          // Check if there's a wall between old position and new position
+          bool blocked = MazeMaps::has_wall(current_layout, old_x, old_y, x, y);
+          
+          if (!blocked) {
+            id(player_x) = x;
+            id(player_y) = y;
+          } else {
+            // Player hit a wall - die and reset after delay
+            id(is_dead) = true;
+          }
+      - delay: 1s
+      - if:
+          condition:
+            lambda: 'return id(is_dead);'
+          then:
+            - script.execute: load_random_map
+
+# -----------------------------
+# SERVO CONFIGURATION
+# -----------------------------
+
+# 1) PWM output for servo signal on GPIO14
+output:
+  - platform: ledc
+    id: servo_output
+    pin: GPIO14
+    # optional fine-tuning:
+    # frequency: 50 Hz is default for servo via 'servo:' component
+  
+  # Passive buzzer PWM output on GPIO13
+  - platform: ledc
+    id: buzzer_output
+    pin: GPIO13
+
+# 2) Servo entity using that PWM output
+servo:
+  - id: my_servo
+    output: servo_output
+    #min_angle: 0°
+    #max_angle: 180°
+    # optional:
+    # idle_level: 7.5%  # center pulse (usually 1.5 ms)
+    # auto_detach_time: 1s
+
+# 3) A number entity to control the servo angle (0–180°) via UI/API
+number:
+  - platform: template
+    name: "Servo Angle"
+    id: servo_angle
+    optimistic: true
+    min_value: 0
+    max_value: 180
+    step: 1
+    unit_of_measurement: "°"
+    icon: "mdi:rotate-3d"
+    set_action:
+      - servo.write:
+          id: my_servo
+          level: !lambda |-
+            // Convert 0–180 degrees to 0.0–1.0 for servo.write
+            float angle = x;         // x is the new number value
+            return angle / 180.0;
+  
+  - platform: template
+    name: "Maze Level"
+    id: maze_level_select
+    optimistic: true
+    min_value: 1
+    max_value: 9
+    step: 1
+    icon: "mdi:map"
+    set_action:
+      - lambda: |-
+          int map_num = (int)x;
+          id(current_map) = map_num;
+          
+          // Get the map layout based on map_num
+          const char (*current_layout)[14] = nullptr;
+          
+          switch(map_num) {
+            case 1: current_layout = MazeMaps::map1_layout; break;
+            case 2: current_layout = MazeMaps::map2_layout; break;
+            case 3: current_layout = MazeMaps::map3_layout; break;
+            case 4: current_layout = MazeMaps::map4_layout; break;
+            case 5: current_layout = MazeMaps::map5_layout; break;
+            case 6: current_layout = MazeMaps::map6_layout; break;
+            case 7: current_layout = MazeMaps::map7_layout; break;
+            case 8: current_layout = MazeMaps::map8_layout; break;
+            case 9: current_layout = MazeMaps::map9_layout; break;
+            default: current_layout = MazeMaps::map1_layout; break;
+          }
+          
+          // Parse marker positions from the layout
+          int m1x = 1, m1y = 2, m2x = 4, m2y = 3;
+          MazeMaps::parse_map(current_layout, m1x, m1y, m2x, m2y);
+          
+          id(map_marker1_x) = m1x;
+          id(map_marker1_y) = m1y;
+          id(map_marker2_x) = m2x;
+          id(map_marker2_y) = m2y;
+          
+          // Randomly place player and end positions (avoiding markers)
+          int valid_cells[36][2];
+          int valid_count = 0;
+          
+          for (int y = 0; y < 6; y++) {
+            for (int x = 0; x < 6; x++) {
+              if ((x == m1x && y == m1y) || (x == m2x && y == m2y)) {
+                continue;
+              }
+              valid_cells[valid_count][0] = x;
+              valid_cells[valid_count][1] = y;
+              valid_count++;
+            }
+          }
+          
+          int player_idx = esp_random() % valid_count;
+          id(player_x) = valid_cells[player_idx][0];
+          id(player_y) = valid_cells[player_idx][1];
+          
+          int end_idx;
+          do {
+            end_idx = esp_random() % valid_count;
+          } while (end_idx == player_idx);
+          
+          id(map_end_x) = valid_cells[end_idx][0];
+          id(map_end_y) = valid_cells[end_idx][1];
+
+# -----------------------------
+# BUZZER CONFIGURATION
+# -----------------------------
+
+# RTTTL component for playing tones on the passive buzzer
+rtttl:
+  id: buzzer
+  output: buzzer_output
+
+# Switch to control the buzzer enable state
+switch:
+  - platform: template
+    name: "Buzzer Tick Switch"
+    id: buzzer_switch
+    icon: "mdi:volume-high"
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+  
+  - platform: template
+    name: "Show Walls"
+    id: show_walls_switch
+    icon: "mdi:wall"
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+
+# -----------------------------
+# DISPLAY CONFIGURATION
+# -----------------------------
+
+# I2C bus configuration
+i2c:
+  sda: GPIO25
+  scl: GPIO26
+  scan: true
+
+# SSD1306 Display (128x64)
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    id: my_display
+    update_interval: 300ms
+    lambda: |-
+      // 6x6 maze game
+      int player_x_pos = id(player_x);
+      int player_y_pos = id(player_y);
+      int end_x = id(map_end_x);
+      int end_y = id(map_end_y);
+      
+      // Maze markers to identify which maze
+      int marker1_x = id(map_marker1_x);
+      int marker1_y = id(map_marker1_y);
+      int marker2_x = id(map_marker2_x);
+      int marker2_y = id(map_marker2_y);
+      int map_num = id(current_map);
+      
+      if (map_num <= 0) {
+        it.print(40, 28, id(font_small), "LOADING...");
+        return;
+      }
+
+      // Calculate cell size (128 pixels / 6 = ~21, 64 pixels / 6 = ~10)
+      int cell_width = 12;
+      int cell_height = 10;
+      
+      // Get the current map layout
+      const char (*current_layout)[14] = nullptr;
+      
+      switch(map_num) {
+        case 1: current_layout = MazeMaps::map1_layout; break;
+        case 2: current_layout = MazeMaps::map2_layout; break;
+        case 3: current_layout = MazeMaps::map3_layout; break;
+        case 4: current_layout = MazeMaps::map4_layout; break;
+        case 5: current_layout = MazeMaps::map5_layout; break;
+        case 6: current_layout = MazeMaps::map6_layout; break;
+        case 7: current_layout = MazeMaps::map7_layout; break;
+        case 8: current_layout = MazeMaps::map8_layout; break;
+        case 9: current_layout = MazeMaps::map9_layout; break;
+        default: current_layout = MazeMaps::map1_layout; break;
+      }
+      
+      // Draw walls from the map layout (if enabled)
+      if (id(show_walls_switch).state) {
+        // Scan through the map and draw walls
+        for (int row = 0; row < 13; row++) {
+          for (int col = 0; col < 13; col++) {
+            char c = current_layout[row][col];
+            
+            // Calculate pixel position
+            int x1 = col * (cell_width / 2);
+            int y1 = row * (cell_height / 2);
+            
+            // Draw horizontal walls
+            if (c == '-') {
+              it.line(x1, y1, x1 + (cell_width / 2), y1);
+            }
+            // Draw vertical walls
+            else if (c == '|') {
+              it.line(x1, y1, x1, y1 + (cell_height / 2));
+            }
+            // Draw corners/junctions
+            else if (c == '+') {
+              // Check adjacent cells for walls
+              bool wall_top = (row > 0 && (current_layout[row-1][col] == '|' || current_layout[row-1][col] == '+'));
+              bool wall_bottom = (row < 12 && (current_layout[row+1][col] == '|' || current_layout[row+1][col] == '+'));
+              bool wall_left = (col > 0 && (current_layout[row][col-1] == '-' || current_layout[row][col-1] == '+'));
+              bool wall_right = (col < 12 && (current_layout[row][col+1] == '-' || current_layout[row][col+1] == '+'));
+              
+              // Draw lines based on connected walls
+              if (wall_top) {
+                it.line(x1, y1, x1, y1 - (cell_height / 2));
+              }
+              if (wall_bottom) {
+                it.line(x1, y1, x1, y1 + (cell_height / 2));
+              }
+              if (wall_left) {
+                it.line(x1, y1, x1 - (cell_width / 2), y1);
+              }
+              if (wall_right) {
+                it.line(x1, y1, x1 + (cell_width / 2), y1);
+              }
+            }
+          }
+        }
+      }
+      
+      // Draw 3x3 squares for each cell (except player and end positions)
+      for (int y = 0; y < 6; y++) {
+        for (int x = 0; x < 6; x++) {
+          if ((x != player_x_pos || y != player_y_pos) && (x != end_x || y != end_y)) {
+            int cx = x * cell_width + cell_width / 2;
+            int cy = y * cell_height + cell_height / 2;
+            it.filled_rectangle(cx - 1, cy - 1, 3, 3);
+          }
+        }
+      }
+      
+      // Draw marker cells (circles around squares)
+      int m1x = marker1_x * cell_width + cell_width / 2;
+      int m1y = marker1_y * cell_height + cell_height / 2;
+      it.circle(m1x, m1y, 4);
+      
+      int m2x = marker2_x * cell_width + cell_width / 2;
+      int m2y = marker2_y * cell_height + cell_height / 2;
+      it.circle(m2x, m2y, 4);
+      
+      // Draw end position (diamond)
+      int ex = end_x * cell_width + cell_width / 2;
+      int ey = end_y * cell_height + cell_height / 2;
+      // Diamond shape
+      it.line(ex, ey - 4, ex - 3, ey);
+      it.line(ex, ey - 4, ex + 3, ey);
+      it.line(ex - 3, ey, ex, ey + 4);
+      it.line(ex + 3, ey, ex, ey + 4);
+      
+      // Draw player (stick figure)
+      int px = player_x_pos * cell_width + cell_width / 2;
+      int py = player_y_pos * cell_height + cell_height / 2;
+      // Head
+      it.circle(px, py - 3, 2);
+      // Body
+      it.line(px, py - 1, px, py + 2);
+      // Arms
+      it.line(px - 2, py, px + 2, py);
+      // Legs
+      it.line(px, py + 2, px - 2, py + 4);
+      it.line(px, py + 2, px + 2, py + 4);
+      
+      // Check death condition
+      if (id(is_dead)) {
+        it.filled_rectangle(20, 24, 88, 16, COLOR_OFF);
+        it.rectangle(20, 24, 88, 16);
+        it.print(38, 28, id(font_small), "YOU DIED!");
+      }
+      // Check win condition
+      else if (player_x_pos == end_x && player_y_pos == end_y) {
+        it.filled_rectangle(30, 24, 68, 16, COLOR_OFF);
+        it.rectangle(30, 24, 68, 16);
+        it.print(50, 28, id(font_small), "YOU WIN!");
+      }
+
+# Fonts for display
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 12
+
+# -----------------------------
+# BUTTON CONFIGURATION
+# -----------------------------
+
+# GPIO buttons for player control
+binary_sensor:
+  - platform: gpio
+    name: "Move Up"
+    id: btn_up
+    pin:
+      number: GPIO19
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x);"
+          new_y: !lambda "return id(player_y) - 1;"
+  
+  - platform: gpio
+    name: "Move Down"
+    id: btn_down
+    pin:
+      number: GPIO21
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x);"
+          new_y: !lambda "return id(player_y) + 1;"
+  
+  - platform: gpio
+    name: "Move Left"
+    id: btn_left
+    pin:
+      number: GPIO22
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x) - 1;"
+          new_y: !lambda "return id(player_y);"
+  
+  - platform: gpio
+    name: "Move Right"
+    id: btn_right
+    pin:
+      number: GPIO23
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x) + 1;"
+          new_y: !lambda "return id(player_y);"
+
+# Web UI buttons for player control
+button:
+  - platform: template
+    name: "Move Up"
+    id: web_btn_up
+    icon: "mdi:arrow-up"
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x);"
+          new_y: !lambda "return id(player_y) - 1;"
+  
+  - platform: template
+    name: "Move Down"
+    id: web_btn_down
+    icon: "mdi:arrow-down"
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x);"
+          new_y: !lambda "return id(player_y) + 1;"
+  
+  - platform: template
+    name: "Move Left"
+    id: web_btn_left
+    icon: "mdi:arrow-left"
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x) - 1;"
+          new_y: !lambda "return id(player_y);"
+  
+  - platform: template
+    name: "Move Right"
+    id: web_btn_right
+    icon: "mdi:arrow-right"
+    on_press:
+      - script.execute:
+          id: check_move
+          new_x: !lambda "return id(player_x) + 1;"
+          new_y: !lambda "return id(player_y);"
+  
+  - platform: template
+    name: "Reset Game"
+    id: web_btn_reset
+    icon: "mdi:restart"
+    on_press:
+      - script.execute: load_random_map
+  
+  - platform: template
+    name: "New Random Maze"
+    id: web_btn_new_maze
+    icon: "mdi:dice-5"
+    on_press:
+      - script.execute: load_random_map
+
+# 4) Example: move to a default position at boot
+interval:
+  - interval: 5s
+    then:
+      - servo.write:
+          id: my_servo
+          level: 0.5   # 0.5 = middle (about 90°)
+    # Remove this interval once you've tested basic movement.
+  
+  # Buzzer tick every second
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            switch.is_on: buzzer_switch
+          then:
+            - rtttl.play:
+                rtttl: "tick:d=4,o=5,b=100:16c6"

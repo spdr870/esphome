@@ -40,6 +40,11 @@ wifi:
   on_disconnect:
     then:
       - component.update: oled_display
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "ESP32S2 Fallback"
+
+captive_portal:
 
 http_request:
   useragent: esphome-radio
@@ -512,6 +517,10 @@ sensor:
     pressure:
       id: pressure
       name: "Panel Pressure"
+      filters:
+        - lambda: |-
+            if (x < 850 || x > 1100) return {};
+            return x;
 
 time:
   - platform: sntp
