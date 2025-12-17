@@ -3,8 +3,9 @@ esphome:
   friendly_name: Servo
   includes:
     - maze_maps.h
+    - button_puzzle.h
   on_boot:
-    priority: -100
+    #priority: -100
     then:
       - script.execute: load_random_map
 
@@ -15,15 +16,17 @@ esp32:
 
 logger:
   level: WARN
+  logs:
+    # main: DEBUG
+    wifi: NONE
+    esp-idf: NONE
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: LIGHT
   ap:
-    ssid: "Devboard Fallback Hotspot"
-
-api:
+    ssid: "Servo Fallback Hotspot"
 
 web_server:
   port: 80
@@ -87,16 +90,313 @@ globals:
     restore_value: no
     initial_value: '0'
   
-  - id: is_dead
+  - id: is_won
     type: bool
     restore_value: no
     initial_value: 'false'
+  
+  - id: led_color
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  - id: button_stage
+    type: int
+    restore_value: no
+    initial_value: '1'
+  
+  - id: pressure
+    type: int
+    restore_value: no
+    initial_value: '10'
+  
+  - id: is_exploded
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  - id: explosion_reason
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  
+  - id: maze_solved
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  - id: puzzle_solved
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  - id: wire_serial_number
+    type: std::string
+    restore_value: no
+    initial_value: '"SN-0000"'
+  
+  - id: wire_puzzle_solved
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  - id: wires_cut
+    type: bool[3]
+    restore_value: no
+    initial_value: '{false, false, false}'
+  
+  - id: wire_stable_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  - id: potentiometer_puzzle_position
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+# -----------------------------
+# SENSOR CONFIGURATION
+# -----------------------------
+
+sensor:
+  # Potentiometer on GPIO34
+  - platform: adc
+    pin: GPIO34
+    name: "Potentiometer"
+    id: potentiometer
+    update_interval: 100ms
+    attenuation: 11db
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 1
+      - lambda: |-
+          // Convert voltage (0-3.3V) to percentage (0-100%)
+          return (x / 3.3) * 100.0;
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    on_value:
+      then:
+        - lambda: |-
+            // Check potentiometer puzzle state
+            float pot_value = id(potentiometer).state;
+            int solved_count = (id(maze_solved) ? 1 : 0) + (id(puzzle_solved) ? 1 : 0) + (id(wire_puzzle_solved) ? 1 : 0);
+            
+            bool is_state_a = pot_value > 80.0;
+            bool is_state_b = pot_value < 55.0;
+            
+            if (is_state_a) {
+              id(potentiometer_puzzle_position) = -1;
+            } else if (is_state_b) {
+              id(potentiometer_puzzle_position) = 1;
+            } else {
+              id(potentiometer_puzzle_position) = 0;
+            }
 
 # Helper script to check if move is valid
 script:
+  - id: check_wire_cut
+    then:
+      - lambda: |-
+          if (id(is_exploded) || id(is_won) || id(wire_puzzle_solved)) {
+            return;
+          }
+          
+          // Get current wire states (sensor ON = cut, sensor OFF = intact)
+          bool new_cut_state[3] = {
+            id(wire_blue).state,    // ON = cut, OFF = intact
+            id(wire_purple).state,  // ON = cut, OFF = intact
+            id(wire_yellow).state   // ON = cut, OFF = intact
+          };
+          
+          // Find which wire was just cut
+          int cut_wire_index = -1;
+          for (int i = 0; i < 3; i++) {
+            if (new_cut_state[i] && !id(wires_cut)[i]) {
+              cut_wire_index = i;
+              ESP_LOGI("wire", "Wire %d was just cut!", i);
+              break;
+            }
+          }
+          
+          if (cut_wire_index == -1) {
+            return; // No new cut detected
+          }
+          
+          // Update stored state
+          for (int i = 0; i < 3; i++) {
+            id(wires_cut)[i] = new_cut_state[i];
+          }
+          
+          // Analyze serial number (get part before "-")
+          std::string serial = id(wire_serial_number);
+          size_t dash_pos = serial.find('-');
+          std::string code = (dash_pos != std::string::npos) ? serial.substr(0, dash_pos) : serial;
+          
+          // Count character types
+          bool has_vowel = false;
+          bool has_consonant = false;
+          bool has_digit = false;
+          bool has_a = false;
+          bool has_b = false;
+          bool has_e = false;
+          bool has_3 = false;
+          bool has_6 = false;
+          bool has_7 = false;
+          bool has_9 = false;
+          bool all_even_digits = true;
+          bool all_odd_digits = true;
+          bool has_any_digit = false;
+          
+          for (char c : code) {
+            if (c >= '0' && c <= '9') {
+              has_digit = true;
+              has_any_digit = true;
+              int digit = c - '0';
+              if (digit % 2 == 0) all_odd_digits = false;
+              else all_even_digits = false;
+              
+              if (c == '3') has_3 = true;
+              if (c == '6') has_6 = true;
+              if (c == '7') has_7 = true;
+              if (c == '9') has_9 = true;
+            } else {
+              char upper = toupper(c);
+              if (upper == 'A' || upper == 'E' || upper == 'I' || upper == 'O' || upper == 'U') {
+                has_vowel = true;
+                if (upper == 'A') has_a = true;
+                if (upper == 'E') has_e = true;
+              } else if ((upper >= 'A' && upper <= 'Z')) {
+                has_consonant = true;
+                if (upper == 'B') has_b = true;
+              }
+            }
+          }
+          
+          // If no digits were found, both flags should be false
+          if (!has_any_digit) {
+            all_even_digits = false;
+            all_odd_digits = false;
+          }
+
+          bool only_vowels = has_vowel && !has_consonant && !has_digit;
+          bool only_digits = has_digit && !has_vowel && !has_consonant;
+          
+          // Check for sequential pattern (1,2,3,4)
+          bool is_sequential = false;
+          if (only_digits && code.length() == 4) {
+            if (code == "1234" || code == "2345" || code == "3456" || 
+                code == "4567" || code == "5678" || code == "6789") {
+              is_sequential = true;
+            }
+          }
+          
+          // Define which wires should be cut based on serial number rules
+          // Wire mapping: 0=Blue, 1=Purple, 2=Yellow
+          bool should_cut[3] = {false, false, false};
+          
+          // Rule 1: Only vowels → cut blue
+          if (only_vowels) {
+            should_cut[0] = true;
+            ESP_LOGI("wire", "Rule: Only vowels → Blue");
+          }
+          // Rule 2: Only digits and contains 3 → cut purple
+          else if (only_digits && has_3) {
+            should_cut[1] = true;
+            ESP_LOGI("wire", "Rule: Only digits with 3 → Purple");
+          }
+          // Rule 3: Contains 'a' and only even numbers → cut yellow
+          else if (has_a && has_any_digit && all_even_digits) {
+            should_cut[2] = true;
+            ESP_LOGI("wire", "Rule: 'A' + even numbers → Yellow");
+          }
+          // Rule 4: Contains 'a' and 3 → cut blue
+          else if (has_a && has_3) {
+            should_cut[0] = true;
+            ESP_LOGI("wire", "Rule: 'A' + 3 → Blue");
+          }
+          // Rule 5: Contains 6 and 9 → cut blue and yellow
+          else if (has_6 && has_9) {
+            should_cut[0] = true;
+            should_cut[2] = true;
+            ESP_LOGI("wire", "Rule: 6 and 9 → Blue and Yellow");
+          }
+          // Rule 6: Sequential digits (like 1234) → cut purple
+          else if (is_sequential) {
+            should_cut[1] = true;
+            ESP_LOGI("wire", "Rule: Sequential digits → Purple");
+          }
+          // Rule 7: 'B' + only odd numbers → cut yellow
+          else if (has_b && has_any_digit && all_odd_digits) {
+            should_cut[2] = true;
+            ESP_LOGI("wire", "Rule: 'B' + odd numbers → Yellow");
+          }
+          // Rule 8: Contains 'E' and 7 → cut purple
+          else if (has_e && has_7) {
+            should_cut[1] = true;
+            ESP_LOGI("wire", "Rule: 'E' and 7 → Purple");
+          }
+          // Rule 9: Mixed vowels with numbers → cut blue
+          else if (has_vowel && has_digit && !has_consonant) {
+            should_cut[0] = true;
+            ESP_LOGI("wire", "Rule: Vowels + numbers → Blue");
+          }
+          // Rule 10: Only even digits → cut yellow
+          else if (only_digits && all_even_digits) {
+            should_cut[2] = true;
+            ESP_LOGI("wire", "Rule: Only even digits → Yellow");
+          }
+          
+          ESP_LOGD("wire", "Should cut: Blue=%d, Purple=%d, Yellow=%d",
+                   should_cut[0], should_cut[1], should_cut[2]);
+          
+          // Check if the wire that was just cut is wrong
+          if (!should_cut[cut_wire_index]) {
+            ESP_LOGE("wire", "WRONG! Wire %d should NOT be cut!", cut_wire_index);
+            id(is_exploded) = true;
+            id(explosion_reason) = "Verkeerde draad geknipt";
+            id(second_display)->update();
+            return;
+          }
+          
+          // Check if all correct wires are now cut
+          bool all_correct = true;
+          for (int i = 0; i < 3; i++) {
+            if (should_cut[i] && !new_cut_state[i]) {
+              all_correct = false;
+              break;
+            }
+          }
+          
+          if (all_correct) {            
+            ESP_LOGI("wire", "CORRECT! All right wires cut!");
+            id(wire_puzzle_solved) = true;
+            auto led_call = id(wire_puzzle_led).turn_off();
+            led_call.perform();
+            id(check_win_condition).execute();
+            id(second_display)->update();
+          }
+  
+  - id: check_win_condition
+    then:
+      - lambda: |-
+          // Check if all puzzles are solved
+          if (id(maze_solved) && id(puzzle_solved) && id(wire_puzzle_solved) && !id(is_won)) {
+            id(is_won) = true;
+            auto call = id(rgb_led).turn_off();
+            call.perform();
+            auto led_call = id(wire_puzzle_led).turn_off();
+            led_call.perform();
+          }
+  
   - id: load_random_map
     then:
       - lambda: |-
+          // Initialize button puzzle
+          auto call = id(rgb_led).turn_on();
+          ButtonPuzzle::initialize(id(button_stage), id(led_color), call);
+          
           // Select random map (1-9) using esp_random
           int map_num = (esp_random() % 9) + 1;
           id(current_map) = map_num;
@@ -143,8 +443,44 @@ script:
             }
           }
           
-          // Reset death state
-          id(is_dead) = false;
+          // Reset win and explosion state
+          id(is_won) = false;
+          id(is_exploded) = false;
+          id(explosion_reason) = "";
+          id(maze_solved) = false;
+          id(puzzle_solved) = false;
+          id(wire_puzzle_solved) = false;
+          
+          // Reset wire cuts
+          id(wires_cut)[0] = false;
+          id(wires_cut)[1] = false;
+          id(wires_cut)[2] = false;
+          
+          // Generate wire puzzle serial number
+          const char* serials[] = {
+            "AEIO-B7",  // Only vowels → blue
+            "UIEO-Z2",  // Only vowels → blue
+            "1357-X3",  // Only digits with 3 → purple
+            "A246-Q8",  // 'a' + only even numbers → yellow
+            "A312-W7",  // 'a' + contains 3 → blue
+            "231A-77",  // 'a' + contains 3 → blue
+            "6B9C-T9",  // Contains 6 and 9 → blue and yellow
+            "1234-V5",  // Only digits with 3 → purple
+            "4567-U6",  // Sequential digits (4,5,6,7) → purple
+            "5678-6Y",  // Sequential digits (4,5,6,7) → purple
+            "B135-W4",  // 'B' + only odd numbers → yellow
+            "E721-A6",  // Contains 'E' and 7 → purple
+            "U1I2-B2",  // Mixed vowels with numbers → blue
+            "4826-I1"   // Only even digits → yellow
+            "1245-A8"   // Only even digits → yellow
+          };
+          int serial_idx = esp_random() % 10;
+          id(wire_serial_number) = serials[serial_idx];
+          
+          // Turn on wire puzzle LED with pulse effect
+          auto led_call = id(wire_puzzle_led).turn_on();
+          led_call.set_effect("Slow Pulse");
+          led_call.perform();
           
           // Randomly select player position
           int player_idx = esp_random() % valid_count;
@@ -182,10 +518,19 @@ script:
           int old_x = id(player_x);
           int old_y = id(player_y);
           int map_num = id(current_map);
+
+          if (map_num <= 0) return;
+
           
           // Check bounds
-          if (x < 0 || x > 5 || y < 0 || y > 5 || map_num <= 0) return;
-          
+          if (x < 0 || x > 5 || y < 0 || y > 5) {
+            // Player hit a wall - explode bomb and reset after delay
+            id(is_exploded) = true;
+            id(explosion_reason) = "Muur geraakt";
+            id(second_display)->update();
+            return;
+          }
+
           // Get the current map layout
           const char (*current_layout)[14] = nullptr;
           
@@ -208,63 +553,150 @@ script:
           if (!blocked) {
             id(player_x) = x;
             id(player_y) = y;
+            
+            // Check if reached end of maze
+            if (x == id(map_end_x) && y == id(map_end_y) && !id(maze_solved)) {
+              id(maze_solved) = true;
+            }
           } else {
-            // Player hit a wall - die and reset after delay
-            id(is_dead) = true;
+            // Player hit a wall - explode bomb and reset after delay
+            id(is_exploded) = true;
+            id(explosion_reason) = "Muur geraakt";
+            id(second_display)->update();
           }
-      - delay: 1s
-      - if:
-          condition:
-            lambda: 'return id(is_dead);'
-          then:
-            - script.execute: load_random_map
+      - script.execute: check_win_condition
 
 # -----------------------------
-# SERVO CONFIGURATION
+# OUTPUT CONFIGURATION
 # -----------------------------
 
-# 1) PWM output for servo signal on GPIO14
 output:
+  # RGB LED PWM outputs (common cathode)
   - platform: ledc
-    id: servo_output
-    pin: GPIO14
-    # optional fine-tuning:
-    # frequency: 50 Hz is default for servo via 'servo:' component
+    id: rgb_red
+    pin: GPIO4
+    channel: 2
   
-  # Passive buzzer PWM output on GPIO13
   - platform: ledc
-    id: buzzer_output
-    pin: GPIO13
+    id: rgb_green
+    pin: GPIO2
+    channel: 3
+  
+  - platform: ledc
+    id: rgb_blue
+    pin: GPIO15
+    channel: 4
+  
+  # Wire puzzle LED (red)
+  - platform: ledc
+    id: wire_puzzle_led_output
+    pin: GPIO12
+    channel: 5
 
-# 2) Servo entity using that PWM output
-servo:
-  - id: my_servo
-    output: servo_output
-    #min_angle: 0°
-    #max_angle: 180°
-    # optional:
-    # idle_level: 7.5%  # center pulse (usually 1.5 ms)
-    # auto_detach_time: 1s
+# RGB Light
+light:
+  - platform: monochromatic
+    name: "Wire Puzzle LED"
+    id: wire_puzzle_led
+    output: wire_puzzle_led_output
+    effects:
+      - pulse:
+          name: "Slow Pulse"
+          transition_length: 1s
+          update_interval: 1s
+          min_brightness: 30%
+          max_brightness: 100%
+    default_transition_length: 0s
+  
+  - platform: rgb
+    name: "RGB LED"
+    id: rgb_led
+    red: rgb_red
+    green: rgb_green
+    blue: rgb_blue
+    effects:
+      - strobe:
+          name: blink_red
+          colors:
+            - state: true
+              red: 100%
+              green: 0%
+              blue: 0%
+              duration: 500ms
+            - state: false
+              duration: 500ms
+      - strobe:
+          name: blink_green
+          colors:
+            - state: true
+              red: 0%
+              green: 100%
+              blue: 0%
+              duration: 500ms
+            - state: false
+              duration: 500ms
+      - strobe:
+          name: blink_blue
+          colors:
+            - state: true
+              red: 0%
+              green: 0%
+              blue: 100%
+              duration: 500ms
+            - state: false
+              duration: 500ms
+      - strobe:
+          name: blink_purple
+          colors:
+            - state: true
+              red: 100%
+              green: 0%
+              blue: 100%
+              duration: 500ms
+            - state: false
+              duration: 500ms
+      - strobe:
+          name: blink_red_fast
+          colors:
+            - state: true
+              red: 100%
+              green: 0%
+              blue: 0%
+              duration: 120ms
+            - state: false
+              duration: 120ms
+      - strobe:
+          name: blink_green_fast
+          colors:
+            - state: true
+              red: 0%
+              green: 100%
+              blue: 0%
+              duration: 120ms
+            - state: false
+              duration: 120ms
+      - strobe:
+          name: blink_blue_fast
+          colors:
+            - state: true
+              red: 0%
+              green: 0%
+              blue: 100%
+              duration: 120ms
+            - state: false
+              duration: 120ms
+      - strobe:
+          name: blink_purple_fast
+          colors:
+            - state: true
+              red: 100%
+              green: 0%
+              blue: 100%
+              duration: 120ms
+            - state: false
+              duration: 120ms
 
-# 3) A number entity to control the servo angle (0–180°) via UI/API
 number:
-  - platform: template
-    name: "Servo Angle"
-    id: servo_angle
-    optimistic: true
-    min_value: 0
-    max_value: 180
-    step: 1
-    unit_of_measurement: "°"
-    icon: "mdi:rotate-3d"
-    set_action:
-      - servo.write:
-          id: my_servo
-          level: !lambda |-
-            // Convert 0–180 degrees to 0.0–1.0 for servo.write
-            float angle = x;         // x is the new number value
-            return angle / 180.0;
-  
   - platform: template
     name: "Maze Level"
     id: maze_level_select
@@ -330,17 +762,13 @@ number:
           id(map_end_x) = valid_cells[end_idx][0];
           id(map_end_y) = valid_cells[end_idx][1];
 
-# -----------------------------
-# BUZZER CONFIGURATION
-# -----------------------------
-
-# RTTTL component for playing tones on the passive buzzer
-rtttl:
-  id: buzzer
-  output: buzzer_output
-
 # Switch to control the buzzer enable state
 switch:
+  - platform: gpio
+    id: buzzer_output
+    pin: GPIO13
+    restore_mode: ALWAYS_OFF
+
   - platform: template
     name: "Buzzer Tick Switch"
     id: buzzer_switch
@@ -361,17 +789,26 @@ switch:
 
 # I2C bus configuration
 i2c:
-  sda: GPIO25
-  scl: GPIO26
-  scan: true
+  - id: bus_a
+    sda: GPIO25 #25
+    scl: GPIO26 #26
+    scan: true
+    frequency: 400kHz
+  
+  - id: bus_b
+    sda: GPIO17 #5
+    scl: GPIO5 #17
+    scan: true
+    frequency: 400kHz
 
-# SSD1306 Display (128x64)
+# SSD1306 Displays (128x64)
 display:
   - platform: ssd1306_i2c
+    i2c_id: bus_a
     model: "SSD1306 128x64"
     address: 0x3C
     id: my_display
-    update_interval: 300ms
+    update_interval: 400ms
     lambda: |-
       // 6x6 maze game
       int player_x_pos = id(player_x);
@@ -391,9 +828,31 @@ display:
         return;
       }
 
+      // Check if won - show disarmed message
+      if (id(is_won)) {
+        it.filled_rectangle(0, 0, 128, 64, COLOR_OFF);
+        it.printf(64, 24, id(font_small), TextAlign::CENTER, "DISARMED!");
+        it.printf(64, 40, id(font_small), TextAlign::CENTER, "BOM ONSCHADELIJK");
+        return;
+      }
+
+      // Check explosion - don't render maze, show explosion message
+      if (id(is_exploded)) {
+        it.filled_rectangle(0, 0, 128, 64, COLOR_OFF);
+        it.printf(64, 24, id(font_small), TextAlign::CENTER, "EXPLODED!");
+        it.printf(64, 40, id(font_small), TextAlign::CENTER, "%s", id(explosion_reason).c_str());
+        return;
+      }
+
+      // Don't render maze if already solved
+      if (id(maze_solved)) {
+        return;
+      }
+
       // Calculate cell size (128 pixels / 6 = ~21, 64 pixels / 6 = ~10)
       int cell_width = 12;
       int cell_height = 10;
+      int offset_x = 8;  // Move maze to the left
       
       // Get the current map layout
       const char (*current_layout)[14] = nullptr;
@@ -419,7 +878,7 @@ display:
             char c = current_layout[row][col];
             
             // Calculate pixel position
-            int x1 = col * (cell_width / 2);
+            int x1 = offset_x + col * (cell_width / 2);
             int y1 = row * (cell_height / 2);
             
             // Draw horizontal walls
@@ -460,7 +919,7 @@ display:
       for (int y = 0; y < 6; y++) {
         for (int x = 0; x < 6; x++) {
           if ((x != player_x_pos || y != player_y_pos) && (x != end_x || y != end_y)) {
-            int cx = x * cell_width + cell_width / 2;
+            int cx = offset_x + x * cell_width + cell_width / 2;
             int cy = y * cell_height + cell_height / 2;
             it.filled_rectangle(cx - 1, cy - 1, 3, 3);
           }
@@ -468,16 +927,16 @@ display:
       }
       
       // Draw marker cells (circles around squares)
-      int m1x = marker1_x * cell_width + cell_width / 2;
+      int m1x = offset_x + marker1_x * cell_width + cell_width / 2;
       int m1y = marker1_y * cell_height + cell_height / 2;
       it.circle(m1x, m1y, 4);
       
-      int m2x = marker2_x * cell_width + cell_width / 2;
+      int m2x = offset_x + marker2_x * cell_width + cell_width / 2;
       int m2y = marker2_y * cell_height + cell_height / 2;
       it.circle(m2x, m2y, 4);
       
       // Draw end position (diamond)
-      int ex = end_x * cell_width + cell_width / 2;
+      int ex = offset_x + end_x * cell_width + cell_width / 2;
       int ey = end_y * cell_height + cell_height / 2;
       // Diamond shape
       it.line(ex, ey - 4, ex - 3, ey);
@@ -486,7 +945,7 @@ display:
       it.line(ex + 3, ey, ex, ey + 4);
       
       // Draw player (stick figure)
-      int px = player_x_pos * cell_width + cell_width / 2;
+      int px = offset_x + player_x_pos * cell_width + cell_width / 2;
       int py = player_y_pos * cell_height + cell_height / 2;
       // Head
       it.circle(px, py - 3, 2);
@@ -498,17 +957,136 @@ display:
       it.line(px, py + 2, px - 2, py + 4);
       it.line(px, py + 2, px + 2, py + 4);
       
-      // Check death condition
-      if (id(is_dead)) {
-        it.filled_rectangle(20, 24, 88, 16, COLOR_OFF);
-        it.rectangle(20, 24, 88, 16);
-        it.print(38, 28, id(font_small), "YOU DIED!");
+      if (false) {
+        // Draw animated pattern on the right side
+        int pattern_x = 100;  // Starting position on right side
+        int pattern_center_y = 32;  // Center line vertically
+        int pattern_height = 20;
+        int min_height = 3;
+        
+        unsigned long seed = millis() / 300;
+        for (int i = 0; i < 8; i++) {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+          int bar_height = (seed % (pattern_height / 2)) + min_height;
+          int y = 4 + i * 7;
+          
+          // Draw symmetrically - same width left and right from center
+          it.filled_rectangle(pattern_x - bar_height, y, bar_height, 5);  // Leftward
+          it.filled_rectangle(pattern_x, y, bar_height, 5);  // Rightward
+        }
+      }
+      else
+      {
+        // Draw animated pattern on the right side
+        int pattern_x = 100;  // Starting position on right side
+        int pattern_center_x = 110;  // Center line horizontally
+        int pattern_width = 16;
+        int min_width = 2;
+        int number_of_wires = 16;
+        int line_height = 64 / number_of_wires;
+        
+        unsigned long seed = millis() / 300;
+        int prev_x_left = pattern_center_x;
+        int prev_x_right = pattern_center_x;
+        for (int i = 0; i < number_of_wires + 1; i++) {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+          int amplitude = (seed % (pattern_width / 2)) + min_width;
+
+          if (i <= 2)
+            amplitude = 0;
+          if (i >= number_of_wires - 2)
+            amplitude = 0;
+
+          int y = i * line_height;
+          int x_left = pattern_center_x - amplitude;
+          int x_right = pattern_center_x + amplitude;
+          
+          // Draw vertical line graph - connect previous point to current point
+          if (i > 0) {
+            it.line(prev_x_left, y - line_height, x_left, y);  // Left line
+            it.line(prev_x_right, y - line_height, x_right, y);  // Right line
+          }
+          prev_x_left = x_left;
+          prev_x_right = x_right;
+        }
       }
       // Check win condition
-      else if (player_x_pos == end_x && player_y_pos == end_y) {
-        it.filled_rectangle(30, 24, 68, 16, COLOR_OFF);
-        it.rectangle(30, 24, 68, 16);
-        it.print(50, 28, id(font_small), "YOU WIN!");
+      if (id(is_won)) {
+        it.filled_rectangle(30, 20, 68, 16, COLOR_OFF);
+        it.rectangle(30, 20, 68, 16);
+        it.print(64, 28, id(font_small), TextAlign::CENTER, "YOU WIN!");
+      }
+  
+  # Second display at address 0x3D
+  # Second display on separate I2C bus
+  - platform: ssd1306_i2c
+    i2c_id: bus_b
+    model: "SSD1306 128x64"
+    address: 0x3C
+    id: second_display
+    update_interval: 5s
+    lambda: |-
+      // Clear display first
+      it.fill(COLOR_OFF);
+      
+      // Simple info display - with safety checks
+      if (id(is_won)) {
+        it.printf(64, 24, id(font_small), TextAlign::CENTER, "DISARMED!");
+        it.printf(64, 40, id(font_small), TextAlign::CENTER, "BOM ONSCHADELIJK");
+      } else if (id(is_exploded)) {
+        it.printf(64, 24, id(font_small), TextAlign::CENTER, "EXPLODED!");
+        if (!id(explosion_reason).empty()) {
+          it.printf(64, 40, id(font_small), TextAlign::CENTER, "%s", id(explosion_reason).c_str());
+        }
+      } else {
+        if (id(potentiometer_puzzle_position) == -1) {
+          int press = id(pressure);
+          it.printf(64, 0, id(font_small), TextAlign::TOP_CENTER, "Druk: %dpsi", press);
+
+          // Draw animated pattern (visually appealing but not helpful)
+          int pattern_y = 31;  // Center line
+          int pattern_height = 16;
+          int min_height = 4;  // Minimum bar height for visibility
+          
+          // Create pseudo-random bars based on current time (not pressure)
+          // This makes it animated but unhelpful for determining danger level
+          unsigned long seed = millis() / 1000;  // Changes every second
+          for (int i = 0; i < 10; i++) {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;  // Simple PRNG
+            int bar_height = (seed % (pattern_height / 2)) + min_height;
+            int x = 9 + i * 11;
+            
+            // Draw symmetrically - same height up and down from center
+            it.filled_rectangle(x, pattern_y - bar_height, 8, bar_height);  // Upward
+            it.filled_rectangle(x, pattern_y, 8, bar_height);  // Downward
+          }
+          
+          if (press < 6) {
+            it.printf(64, 50, id(font_small), TextAlign::CENTER, "Druk kritiek laag!");
+          } else if (press > 94) {
+            it.printf(64, 50, id(font_small), TextAlign::CENTER, "Druk kritiek hoog!");
+          }
+        }
+        if (id(potentiometer_puzzle_position) == 1) {        
+          // Wire puzzle info
+          it.printf(0, 0, id(font_small), "Productiedatum:");
+          it.printf(0, 15, id(font_small), "13 dec 2025");
+          it.printf(0, 35, id(font_small), "Serienummer:");
+          it.printf(0, 50, id(font_small), "%s", id(wire_serial_number).c_str());
+
+          int width = 128;
+
+          // Draw random dot pattern on far right (5 pixels wide, full height)
+          unsigned long seed = millis() / 100;  // Changes every 100ms
+          for (int y = 0; y < 64; y++) {
+            for (int x = 0; x < width; x++) {
+              seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+              if ((seed % 1000) < 270) {
+                it.draw_pixel_at((128 - width) + x, y, COLOR_OFF);
+              }
+            }
+          }          
+        }
       }
 
 # Fonts for display
@@ -524,17 +1102,73 @@ font:
 # GPIO buttons for player control
 binary_sensor:
   - platform: gpio
+    name: "Big Button"
+    id: big_button
+    pin:
+      number: GPIO16
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on_off: 50ms
+    on_click:
+      - min_length: 50ms
+        max_length: 2000ms
+        then:
+          - if:
+              condition:
+                lambda: 'return !id(is_exploded);'
+              then:
+                - lambda: |-
+                    auto call = id(rgb_led).make_call();
+                    ButtonPuzzle::handle_short_press(id(button_stage), id(led_color), id(pressure), call, id(is_exploded), id(explosion_reason), id(puzzle_solved));
+                - script.execute: check_win_condition
+    on_release:
+      - if:
+          condition:
+            lambda: 'return !id(is_exploded);'
+          then:
+            - lambda: |-
+                auto call = id(rgb_led).make_call();
+                ButtonPuzzle::handle_release(id(button_stage), id(led_color), id(pressure), call, id(is_exploded), id(explosion_reason));
+    on_press:
+      - delay: 3s
+      - if:
+          condition:
+            and:
+              - binary_sensor.is_on: big_button
+              - lambda: 'return !id(is_exploded);'
+          then:
+            - lambda: |-
+                auto call = id(rgb_led).make_call();
+                ButtonPuzzle::handle_long_press(id(button_stage), id(led_color), call, id(is_exploded), id(explosion_reason));
+  
+  - platform: gpio
     name: "Move Up"
     id: btn_up
     pin:
       number: GPIO19
       mode: INPUT_PULLUP
       inverted: true
+    filters:
+      - delayed_on_off: 50ms
     on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x);"
-          new_y: !lambda "return id(player_y) - 1;"
+      - if:
+          condition:
+            lambda: 'return !id(is_exploded);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(maze_solved);'
+                then:
+                  - lambda: |-
+                      id(is_exploded) = true;
+                      id(explosion_reason) = "Bewogen na oplossing";
+                      id(second_display)->update();
+                else:
+                  - script.execute:
+                      id: check_move
+                      new_x: !lambda "return id(player_x);"
+                      new_y: !lambda "return id(player_y) - 1;"
   
   - platform: gpio
     name: "Move Down"
@@ -543,11 +1177,26 @@ binary_sensor:
       number: GPIO21
       mode: INPUT_PULLUP
       inverted: true
+    filters:
+      - delayed_on_off: 50ms
     on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x);"
-          new_y: !lambda "return id(player_y) + 1;"
+      - if:
+          condition:
+            lambda: 'return !id(is_exploded);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(maze_solved);'
+                then:
+                  - lambda: |-
+                      id(is_exploded) = true;
+                      id(explosion_reason) = "Bewogen na oplossing";
+                      id(second_display)->update();
+                else:
+                  - script.execute:
+                      id: check_move
+                      new_x: !lambda "return id(player_x);"
+                      new_y: !lambda "return id(player_y) + 1;"
   
   - platform: gpio
     name: "Move Left"
@@ -556,11 +1205,26 @@ binary_sensor:
       number: GPIO22
       mode: INPUT_PULLUP
       inverted: true
+    filters:
+      - delayed_on_off: 50ms
     on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x) - 1;"
-          new_y: !lambda "return id(player_y);"
+      - if:
+          condition:
+            lambda: 'return !id(is_exploded);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(maze_solved);'
+                then:
+                  - lambda: |-
+                      id(is_exploded) = true;
+                      id(explosion_reason) = "Bewogen na oplossing";
+                      id(second_display)->update();
+                else:
+                  - script.execute:
+                      id: check_move
+                      new_x: !lambda "return id(player_x) - 1;"
+                      new_y: !lambda "return id(player_y);"
   
   - platform: gpio
     name: "Move Right"
@@ -569,83 +1233,188 @@ binary_sensor:
       number: GPIO23
       mode: INPUT_PULLUP
       inverted: true
+    filters:
+      - delayed_on_off: 50ms
     on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x) + 1;"
-          new_y: !lambda "return id(player_y);"
+      - if:
+          condition:
+            lambda: 'return !id(is_exploded);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(maze_solved);'
+                then:
+                  - lambda: |-
+                      id(is_exploded) = true;
+                      id(explosion_reason) = "Bewogen na oplossing";
+                      id(second_display)->update();
+                else:
+                  - script.execute:
+                      id: check_move
+                      new_x: !lambda "return id(player_x) + 1;"
+                      new_y: !lambda "return id(player_y);"
+  
+  # Pressure release button
+  - platform: gpio
+    name: "Pressure Release"
+    id: pressure_release_btn
+    pin:
+      number: GPIO18
+      mode: INPUT_PULLUP
+      inverted: true
+    on_click:
+      - min_length: 50ms
+        max_length: 500ms
+        then:
+          - lambda: |-
+              if (id(is_exploded)) {
+                // Check if all wires are connected (sensors should be OFF when connected)
+                bool all_wires_connected = !id(wire_blue).state && !id(wire_purple).state && !id(wire_yellow).state;
+                
+                if (!all_wires_connected) {
+                  // Show message to connect wires
+                  id(explosion_reason) = "Sluit alle draden aan";
+                } else {
+                  // Reset entire game
+                  id(is_exploded) = false;
+                  id(explosion_reason) = "";
+                  id(pressure) = 10;
+                  auto call = id(rgb_led).turn_on();
+                  ButtonPuzzle::initialize(id(button_stage), id(led_color), call);
+                  id(load_random_map).execute();
+                }
+              } else {
+                // Explode the bomb
+                id(is_exploded) = true;
+                id(explosion_reason) = "Druk knop beveiliging";
+                id(second_display)->update();
+              }
+  
+  # Wire puzzle - Wire inputs (Blue, Purple, Yellow)
+  # When wire is cut, pin pulled HIGH (sensor ON). When intact (grounded), reads LOW (sensor OFF)
+  - platform: gpio
+    name: "Wire Blue"
+    id: wire_blue
+    pin:
+      number: GPIO32
+      mode: INPUT_PULLUP
+    filters:
+      - delayed_on_off: 100ms
+    on_press:
+      - script.execute: check_wire_cut
+    on_release:
+      - lambda: |-
+          // Re-arm the wire puzzle when wire is reconnected
+          if (!id(is_exploded) && !id(is_won)) {
+            id(wires_cut)[0] = false;
+            id(wire_puzzle_solved) = false;
+            auto led_call = id(wire_puzzle_led).turn_on();
+            led_call.set_effect("Slow Pulse");
+            led_call.perform();
+            ESP_LOGI("wire", "Blue wire reconnected - puzzle re-armed");
+          }
+  
+  - platform: gpio
+    name: "Wire Purple"
+    id: wire_purple
+    pin:
+      number: GPIO33
+      mode: INPUT_PULLUP
+    filters:
+      - delayed_on_off: 100ms
+    on_press:
+      - script.execute: check_wire_cut
+    on_release:
+      - lambda: |-
+          // Re-arm the wire puzzle when wire is reconnected
+          if (!id(is_exploded) && !id(is_won)) {
+            id(wires_cut)[1] = false;
+            id(wire_puzzle_solved) = false;
+            auto led_call = id(wire_puzzle_led).turn_on();
+            led_call.set_effect("Slow Pulse");
+            led_call.perform();
+            ESP_LOGI("wire", "Purple wire reconnected - puzzle re-armed");
+          }
+  
+  - platform: gpio
+    name: "Wire Yellow"
+    id: wire_yellow
+    pin:
+      number: GPIO14
+      mode: INPUT_PULLUP
+    filters:
+      - delayed_on_off: 100ms
+    on_press:
+      - script.execute: check_wire_cut
+    on_release:
+      - lambda: |-
+          // Re-arm the wire puzzle when wire is reconnected
+          if (!id(is_exploded) && !id(is_won)) {
+            id(wires_cut)[2] = false;
+            id(wire_puzzle_solved) = false;
+            auto led_call = id(wire_puzzle_led).turn_on();
+            led_call.set_effect("Slow Pulse");
+            led_call.perform();
+            ESP_LOGI("wire", "Yellow wire reconnected - puzzle re-armed");
+          }
 
-# Web UI buttons for player control
-button:
-  - platform: template
-    name: "Move Up"
-    id: web_btn_up
-    icon: "mdi:arrow-up"
-    on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x);"
-          new_y: !lambda "return id(player_y) - 1;"
-  
-  - platform: template
-    name: "Move Down"
-    id: web_btn_down
-    icon: "mdi:arrow-down"
-    on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x);"
-          new_y: !lambda "return id(player_y) + 1;"
-  
-  - platform: template
-    name: "Move Left"
-    id: web_btn_left
-    icon: "mdi:arrow-left"
-    on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x) - 1;"
-          new_y: !lambda "return id(player_y);"
-  
-  - platform: template
-    name: "Move Right"
-    id: web_btn_right
-    icon: "mdi:arrow-right"
-    on_press:
-      - script.execute:
-          id: check_move
-          new_x: !lambda "return id(player_x) + 1;"
-          new_y: !lambda "return id(player_y);"
-  
-  - platform: template
-    name: "Reset Game"
-    id: web_btn_reset
-    icon: "mdi:restart"
-    on_press:
-      - script.execute: load_random_map
-  
-  - platform: template
-    name: "New Random Maze"
-    id: web_btn_new_maze
-    icon: "mdi:dice-5"
-    on_press:
-      - script.execute: load_random_map
-
-# 4) Example: move to a default position at boot
+# Intervals for pressure control
 interval:
-  - interval: 5s
-    then:
-      - servo.write:
-          id: my_servo
-          level: 0.5   # 0.5 = middle (about 90°)
-    # Remove this interval once you've tested basic movement.
-  
-  # Buzzer tick every second
-  - interval: 1s
+  # Pressure release control - decrease while held
+  - interval: 100ms
     then:
       - if:
           condition:
-            switch.is_on: buzzer_switch
+            binary_sensor.is_on: pressure_release_btn
           then:
-            - rtttl.play:
-                rtttl: "tick:d=4,o=5,b=100:16c6"
+            - lambda: |-
+                if (!id(is_exploded)) {
+                  id(pressure)--;
+                  if (id(pressure) < 0) {
+                    id(is_exploded) = true;
+                    id(explosion_reason) = "Druk te laag";
+                  }
+                  id(second_display)->update();
+                }
+  
+  # Pressure increase every second
+  - interval: 1s
+    then:
+      - lambda: |-
+          // Increase pressure
+          if (!id(is_exploded) && !id(is_won) && !id(pressure_release_btn).state) {
+            id(pressure)++;
+            if (id(pressure) >= 100) {
+              id(is_exploded) = true;
+              id(explosion_reason) = "Druk te hoog";
+            }
+            id(second_display)->update();
+          }
+      - if:
+          condition:
+            and:
+              - switch.is_on: buzzer_switch
+              - lambda: 'return !id(is_exploded) && !id(is_won) && !id(pressure_release_btn).state;'
+          then:
+              - switch.turn_on: buzzer_output
+              - delay: 30ms
+              - switch.turn_off: buzzer_output
+  
+  # Check for wire reconnection during reset
+  - interval: 200ms
+    then:
+      - lambda: |-
+          // Check if waiting for wires to be connected
+          if (id(is_exploded) && id(explosion_reason) == "Sluit alle draden aan") {
+            bool all_wires_connected = !id(wire_blue).state && !id(wire_purple).state && !id(wire_yellow).state;
+            
+            if (all_wires_connected) {
+              // All wires connected, start the game
+              id(is_exploded) = false;
+              id(explosion_reason) = "";
+              id(pressure) = 10;
+              auto call = id(rgb_led).turn_on();
+              ButtonPuzzle::initialize(id(button_stage), id(led_color), call);
+              id(load_random_map).execute();
+            }
+          }

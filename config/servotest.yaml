@@ -1,0 +1,93 @@
+esphome:
+  name: servotest
+  friendly_name: ServoTest
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Servotest Fallback Hotspot"
+
+captive_portal:
+
+web_server:
+  port: 80
+
+# =========================
+# Servo PWM
+# =========================
+output:
+  - platform: ledc
+    pin: GPIO26
+    id: servo_pwm
+    frequency: 50Hz
+
+# =========================
+# Potentiometer (stuurt servo)
+# =========================
+sensor:
+  - platform: adc
+    pin: GPIO34
+    id: pot34
+    name: "Potmeter GPIO34"
+    attenuation: 11db
+    update_interval: 50ms
+    filters:
+      - clamp:
+          min_value: 0.14
+          max_value: 3.12
+      - lambda: |-
+          return (x - 0.14f) / (3.12f - 0.14f);
+      - clamp:
+          min_value: 0.0
+          max_value: 1.0
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 1
+    on_value:
+      then:
+        - output.set_level:
+            id: servo_pwm
+            level: !lambda |-
+              const float min_us = 500.0f;
+              const float max_us = 2500.0f;
+              float pulse_us = min_us + x * (max_us - min_us);
+              return pulse_us / 20000.0f;
+
+# =========================
+# Handmatige servo bediening (optioneel)
+# =========================
+number:
+  - platform: template
+    name: "Servo Pulse (µs)"
+    id: servo_pulse_us
+    min_value: 500
+    max_value: 2500
+    step: 5
+    mode: slider
+    optimistic: true
+    initial_value: 1500
+    set_action:
+      - output.set_level:
+          id: servo_pwm
+          level: !lambda |-
+            return x / 20000.0f;
+
+button:
+  - platform: template
+    name: "Servo Center (1500 µs)"
+    on_press:
+      - output.set_level:
+          id: servo_pwm
+          level: 0.075
