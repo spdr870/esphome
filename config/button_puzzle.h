@@ -72,16 +72,17 @@ void initialize(int& button_stage, int& led_color, esphome::light::LightCall& ca
 }
 
 // Reset puzzle to stage 1
-void reset(int& button_stage, int& led_color, esphome::light::LightCall& call, bool& is_exploded, std::string& explosion_reason) {
+void reset(int& button_stage, int& led_color, esphome::light::LightCall& call) {
     ESP_LOGW("ButtonPuzzle", "Reset called - BOMB EXPLODED!");
-    is_exploded = true;
-    explosion_reason = "Verkeerde knop";
+    // Trigger global explode handling script with reason
+    id(explode).execute("Verkeerde knop");
+    // Turn off LED locally
     call.set_state(false);
     call.perform();
 }
 
 // Handle short press
-void handle_short_press(int& button_stage, int& led_color, int game_timer, esphome::light::LightCall& call, bool& is_exploded, std::string& explosion_reason, bool& puzzle_solved) {
+void handle_short_press(int& button_stage, int& led_color, int game_timer, esphome::light::LightCall& call, bool& puzzle_solved) {
     // Stage 1: Non-blinking
     if (button_stage == 1) {
         // Blue + short press at digit 7 = stage 3 (fast blinking)
@@ -142,18 +143,18 @@ void handle_short_press(int& button_stage, int& led_color, int game_timer, espho
 
         // Wrong timing, restart
         ESP_LOGW("ButtonPuzzle", "Reset because of wrong release timing in stage 3. Color: %d, Last digit: %d", led_color, game_timer % 10);
-        reset(button_stage, led_color, call, is_exploded, explosion_reason);
+        reset(button_stage, led_color, call);
         return;
     }
 
     ESP_LOGW("ButtonPuzzle", "Reset because of short press. Color: %d, Last digit: %d", led_color, game_timer % 10);
 
     // Wrong action, restart
-    reset(button_stage, led_color, call, is_exploded, explosion_reason);
+    reset(button_stage, led_color, call);
 }
 
 // Handle release
-void handle_release(int& button_stage, int& led_color, int game_timer, esphome::light::LightCall& call, bool& is_exploded, std::string& explosion_reason) {
+void handle_release(int& button_stage, int& led_color, int game_timer, esphome::light::LightCall& call) {
     // Stage 2: Slow blinking
     if (button_stage == 2) {
         bool correct = false;
@@ -199,18 +200,18 @@ void handle_release(int& button_stage, int& led_color, int game_timer, esphome::
 
         // Wrong timing, restart
         ESP_LOGW("ButtonPuzzle", "Reset because of wrong release timing in stage 2. Color: %d, Last digit: %d", led_color, game_timer % 10);
-        reset(button_stage, led_color, call, is_exploded, explosion_reason);
+        reset(button_stage, led_color, call);
         return;
     }
 }
 
 // Handle long press (called after 3s delay, only if button still pressed)
-void handle_long_press(int& button_stage, int& led_color, esphome::light::LightCall& call, bool& is_exploded, std::string& explosion_reason) {
+void handle_long_press(int& button_stage, int& led_color, esphome::light::LightCall& call) {
     // Stage 1: Long press on red or purple goes to stage 2 (blinking)
     if (button_stage == 1 && (led_color == 0)) {
         //Wrong color (blue), restart
         ESP_LOGW("ButtonPuzzle", "Reset because of long press on wrong color (blue). Color: %d", led_color);
-        reset(button_stage, led_color, call, is_exploded, explosion_reason);
+        reset(button_stage, led_color, call);
         return;
     }
 
