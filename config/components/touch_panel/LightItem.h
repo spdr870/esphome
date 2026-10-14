@@ -6,9 +6,9 @@
 #include <algorithm>
 
 #include "esphome.h"
-#include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
+#include <LovyanGFX.hpp>
 
+#include "LGFX_ILI9488_Touch.h"
 #include "PanelItem.h"
 
 #ifndef lightItem_h
@@ -25,7 +25,7 @@ public:
   void SetState(bool on) { if (on_ != on) { on_ = on; Invalidate(); } }
   bool State() const { return on_; }
 
- bool RenderIfDirty(TFT_eSPI& tft, TFT_eSprite& spr) override {
+ bool RenderIfDirty(LGFX_ILI9488_Touch& tft, LGFX_Sprite& spr) override {
     uint16_t fill   = on_ ? TFT_YELLOW : TFT_NAVY;
     uint16_t stroke = on_ ? TFT_WHITE : TFT_LIGHTGREY;
     uint16_t text = on_ ? TFT_BLACK : TFT_LIGHTGREY;
@@ -34,7 +34,8 @@ public:
     spr.drawRoundRect(0, 0, B().w, B().h, 8, stroke);
     spr.setTextDatum(MC_DATUM);
     spr.setTextColor(text, fill);
-    spr.drawString(label_.c_str(), B().w/2, B().h/2, 2);
+    spr.setFont(&fonts::Font2);
+    spr.drawString(label_.c_str(), B().w/2, B().h/2);
 
     return true;
   }

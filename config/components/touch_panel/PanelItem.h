@@ -6,8 +6,9 @@
 #include <algorithm>
 
 #include "esphome.h"
-#include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
+#include <LovyanGFX.hpp>
+
+#include "LGFX_ILI9488_Touch.h"
 
 #ifndef panelitem_h
 #define panelitem_h
@@ -29,7 +30,7 @@ namespace touch_panel {
 
     // Now receives the panel's shared sprite. Draw into 'spr', then push.
     // Return true if something was drawn.
-    virtual bool RenderIfDirty(TFT_eSPI& tft, TFT_eSprite& spr) = 0;
+    virtual bool RenderIfDirty(LGFX_ILI9488_Touch& tft, LGFX_Sprite& spr) = 0;
 
     virtual void Tick(uint32_t now_ms) {}
     virtual bool HitTest(int x, int y) const = 0;

@@ -1,0 +1,334 @@
+esphome:
+  name: touch-panel
+  comment: "ESP32-S3 + ILI9488 + XPT2046 + LVGL"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: ESP32S3
+  cpu_frequency: 240MHz
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+  speed: 40MHz
+
+logger:
+  level: WARN
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+web_server:
+  port: 80
+
+# ---------- Time ----------
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Amsterdam
+    on_time:
+      - seconds: /1
+        then:
+          - lvgl.label.update:
+              id: label_time
+              text:
+                format: "%02d:%02d:%02d"
+                args: [ "id(sntp_time).now().hour", "id(sntp_time).now().minute", "id(sntp_time).now().second" ]
+      - seconds: /5
+        then:
+          - lvgl.label.update:
+              id: label_uptime
+              text:
+                format: "Uptime: %s"
+                args: [ "id(uptime_text).state.c_str()" ]
+
+# ---------- Buses ----------
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO13
+  miso_pin: GPIO12
+
+i2s_audio:
+  id: i2s0
+  i2s_bclk_pin: GPIO40
+  i2s_lrclk_pin: GPIO41
+
+media_player:
+  - platform: i2s_audio
+    id: s3_radio
+    name: "S3 I2S DAC"
+    dac_type: external
+    i2s_audio_id: i2s0
+    i2s_dout_pin: GPIO42    # -> PCM5102A DIN / SD
+    mode: stereo
+    internal: True
+
+http_request:
+  useragent: esphome-radio
+  verify_ssl: false
+
+i2c:
+  sda: 11
+  scl: 10
+  scan: true
+  id: bus_sht
+  frequency: 100kHz
+
+# ---------- Sensors ----------
+sensor:
+  - platform: aht10
+    variant: AHT20
+    i2c_id: bus_sht
+    address: 0x38
+    update_interval: 30s
+    temperature:
+      id: temperature
+      name: "Panel Temperature"
+      on_value:
+        then:
+          - lvgl.label.update:
+              id: label_temp
+              text:
+                format: "T: %.1f°C"
+                args: [ "id(temperature).state" ]
+    humidity:
+      id: humidity
+      name: "Panel Humidity"
+      on_value:
+        then:
+          - lvgl.label.update:
+              id: label_hum
+              text:
+                format: "RH: %.1f%%"
+                args: [ "id(humidity).state" ]
+  - platform: bmp280_i2c
+    i2c_id: bus_sht
+    address: 0x77
+    update_interval: 30s
+    pressure:
+      id: pressure
+      name: "Panel Pressure"
+
+  - platform: uptime
+    id: uptime_seconds
+    name: "Panel Uptime"
+    update_interval: 60s
+
+binary_sensor:
+  - platform: gpio
+    id: pir_motion
+    name: "Radar Presence"
+    pin:
+      number: GPIO7
+     # mode: INPUT_PULLUP       # or INPUT if the board has a pull-down resistor
+     # inverted: false        # needed if output is active-low
+    device_class: motion
+    filters:
+    #  - delayed_off: 1s
+      - delayed_on: 250ms
+    on_press:
+       - script.execute: display_on
+    on_release:
+       - script.execute: display_off
+
+# ---------- Display ----------
+display:
+  - platform: ili9xxx
+    id: tft
+    model: ILI9488
+    cs_pin: GPIO5
+    dc_pin: GPIO2
+    reset_pin: GPIO4
+    rotation: 270
+    color_order: BGR
+    auto_clear_enabled: false   # LVGL draws the screen
+    update_interval: never      # LVGL schedules updates
+    invert_colors: True
+
+# ---------- Touch ----------
+touchscreen:
+  - platform: xpt2046
+    id: ts0
+    cs_pin: GPIO9
+    interrupt_pin: GPIO17
+    #irq_pin: GPIO17
+    update_interval: 50ms
+    #report_interval: 50ms
+    transform: 
+      swap_xy: True
+      mirror_x: True
+      mirror_y: False
+    #swap_x_y: true        # adjust after testing
+    calibration: 
+      x_min: 200            # <--- CALIBRATE these four
+      x_max: 3900
+      y_min: 300
+      y_max: 3800
+
+text_sensor:
+  - platform: template
+    id: uptime_text
+    name: "Uptime (formatted)"
+    lambda: |-
+      int s = (int) id(uptime_seconds).state;
+      int d = s / 86400;
+      int h = (s % 86400) / 3600;
+      int m = (s % 3600) / 60;
+
+      char buf[20];
+      if (d > 0) {
+        snprintf(buf, sizeof(buf), "%dd %dh", d, h);
+      } else if (h > 0) {
+        snprintf(buf, sizeof(buf), "%dh %dm", h, m);
+      } else {
+        snprintf(buf, sizeof(buf), "%dm", m);
+      }
+      return std::string(buf);    
+
+switch:
+  - platform: homeassistant
+    internal: False
+    name: "Stereo"
+    id: garage_stereo
+    entity_id: switch.garage_stereo
+
+# ---------- Backlight ----------
+output:
+  - platform: ledc
+    id: bl_pin
+    pin: GPIO38
+
+light:
+  - platform: monochromatic
+    id: display_backlight
+    output: bl_pin
+    name: "Display Backlight"
+    restore_mode: RESTORE_DEFAULT_ON
+
+# ---------- LVGL UI ----------
+lvgl:
+  displays: [tft]
+  default_font: montserrat_24
+  touchscreens:
+    - touchscreen_id: ts0
+  color_depth: 16
+  width: 480
+  height: 320
+  bg_color: 0x000000
+  scrollable: False
+  style_definitions:
+    - id: style_button_on
+      bg_color: GREEN
+      text_color: BLACK
+      pad_all: 10
+    - id: style_label_white
+      text_color: WHITE
+
+  # Build UI with a 6x6 grid similar to your old layout
+  widgets:
+    - obj:
+        align: CENTER
+        id: root
+        width: 480
+        height: 320
+        bg_opa: TRANSP
+        border_opa: TRANSP
+        scrollable: False
+        styles: style_label_white
+        layout:
+          type: grid
+          grid_columns: ["FR(1)","FR(1)","FR(1)","FR(1)","FR(1)","FR(1)"]
+          grid_rows:    ["FR(1)","FR(1)","FR(1)","FR(1)","FR(1)","FR(1)"]
+          pad_row: 6
+          pad_column: 6
+        widgets:
+
+          # Clock (top-left; spans 3x3)
+          - label:
+              id: label_time
+              text: "--:--:--"
+              grid_cell_column_pos: 0
+              grid_cell_row_pos: 0
+              grid_cell_column_span: 2
+              grid_cell_row_span: 1
+              align: CENTER
+              text_font: montserrat_38
+          - label:
+              id: label_uptime  
+              text: "Uptime: --"
+              grid_cell_column_pos: 0
+              grid_cell_row_pos: 4
+              grid_cell_column_span: 2
+              align: CENTER
+          - button:
+              id: btn_play
+              grid_cell_column_pos: 0
+              grid_cell_row_pos: 1
+              grid_cell_column_span: 2
+              align: CENTER
+              styles: style_button_on
+              on_click:
+                then:
+                  - switch.turn_on: garage_stereo
+                  - media_player.volume_set:
+                      id: s3_radio
+                      volume: 1.0      # 0.0–1.0
+                  - media_player.play_media:
+                      id: s3_radio
+                      media_url: "https://stream.qmusic.nl/qmusic/mp3"
+              widgets:
+                - label:
+                    text: "Play"
+          - button:
+              id: btn_stop
+              grid_cell_column_pos: 0
+              grid_cell_row_pos: 3
+              grid_cell_column_span: 2
+              align: CENTER
+              styles: style_button_on
+              on_click:
+                then:
+                - switch.turn_off: garage_stereo
+                - media_player.stop:
+                    id: s3_radio
+              widgets:
+                - label:
+                    text: "Stop"
+          # Env card (top-right; 2x2)
+          - obj:
+              id: env_card
+              grid_cell_column_pos: 3
+              grid_cell_row_pos: 0
+              grid_cell_column_span: 3
+              grid_cell_row_span: 2
+              width: 50%
+              widgets:
+                - label:
+                    id: label_temp
+                    text: "T: --.-°C"
+                - label:
+                    id: label_hum
+                    y: 28
+                    text: "RH: --.-%"
+
+script:
+  - id: display_on
+    then:
+      - light.turn_on: display_backlight
+  - id: display_off
+    then:
+      - light.turn_off: display_backlight
+  - id: play_station
+    then:
+      - media_player.volume_set:
+          id: s3_radio
+          volume: 1.0            # 0.0–1.0; use 1.0 for 100%
+      - media_player.play_media:
+          id: s3_radio
+          media_url: 'https://stream.qmusic.nl/qmusic/mp3'

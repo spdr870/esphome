@@ -6,9 +6,9 @@
 #include <algorithm>
 
 #include "esphome.h"
-#include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
+#include <LovyanGFX.hpp>
 
+#include "LGFX_ILI9488_Touch.h"
 #include "PanelItem.h"
 
 #ifndef envItem_h
@@ -27,7 +27,7 @@ public:
     }
   }
 
-  bool RenderIfDirty(TFT_eSPI& tft, TFT_eSprite& spr) override {
+  bool RenderIfDirty(LGFX_ILI9488_Touch& tft, LGFX_Sprite& spr) override {
     // --- layout ---
     const int w = B().w, h = B().h;
     const int pad = 6;
@@ -57,11 +57,15 @@ public:
     spr.setTextDatum(TL_DATUM);
     spr.setTextColor(ink, bg);
     static int tpad = 0;
-    if (!tpad) tpad = spr.textWidth("-00.0°C", 4);
+    if (!tpad) {
+      spr.setFont(&fonts::Font4);
+      tpad = spr.textWidth("-00.0°C");
+    }
     spr.setTextPadding(tpad);
     char buf[32];
     snprintf(buf, sizeof(buf), "%.1f°C", t_);
-    spr.drawString(buf, iconX + 30, pad + 11, 4);
+    spr.setFont(&fonts::Font4);
+    spr.drawString(buf, iconX + 30, pad + 11);
 
     // --- droplet icon (bottom row) ---
     float hPct = h_ / 100.0f;
@@ -73,10 +77,11 @@ public:
 
     // humidity text
     static int hpad_txt = 0;
-    if (!hpad_txt) hpad_txt = spr.textWidth("100%", 4);
+    spr.setFont(&fonts::Font4);
+    if (!hpad_txt) hpad_txt = spr.textWidth("100%");
     spr.setTextPadding(hpad_txt);
     snprintf(buf, sizeof(buf), "%.0f%%", h_);
-    spr.drawString(buf, iconX + 30, h/2 + pad + 6, 4);
+    spr.drawString(buf, iconX + 30, h/2 + pad + 6);
 
     return true;
   }
@@ -88,7 +93,7 @@ private:
 
   // Simple thermometer with outline + variable-level fill.
   // (x,y) is top-left of the icon bounding box.
-  static void drawThermometer_(TFT_eSprite& spr, int x, int y, int stemH, int stemW, int bulbR,
+  static void drawThermometer_(LGFX_Sprite& spr, int x, int y, int stemH, int stemW, int bulbR,
                                uint16_t outlineCol, uint16_t fillCol, float pct)
   {
     // Geometry
@@ -117,7 +122,7 @@ private:
 
   // Minimal droplet: circle + top “teardrop” tip; fill level mask using a rect.
   // (x,y) is top-left of the icon box; size ~ height.
-  static void drawDroplet_(TFT_eSprite& spr, int x, int y, int size,
+  static void drawDroplet_(LGFX_Sprite& spr, int x, int y, int size,
                            uint16_t outlineCol, uint16_t fillCol, float pct)
   {
     const int w = size, h = size;

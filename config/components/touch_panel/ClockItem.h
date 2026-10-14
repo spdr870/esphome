@@ -6,9 +6,9 @@
 #include <algorithm>
 
 #include "esphome.h"
-#include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
+#include <LovyanGFX.hpp>
 
+#include "LGFX_ILI9488_Touch.h"
 #include "PanelItem.h"
 
 #ifndef clockItem_h
@@ -26,17 +26,18 @@ public:
     Invalidate();
   }
 
-  bool RenderIfDirty(TFT_eSPI& tft, TFT_eSprite& spr) override {
+  bool RenderIfDirty(LGFX_ILI9488_Touch& tft, LGFX_Sprite& spr) override {
     spr.setTextDatum(TL_DATUM);
     spr.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
 
     static int pad = 0;
-    if (pad == 0) pad = spr.textWidth("00:00:00", 4);
+    spr.setFont(&fonts::Font4);
+    if (pad == 0) pad = spr.textWidth("00:00:00");
     spr.setTextPadding(pad);
 
     char buf[16];
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hours_, minutes_, seconds_);
-    spr.drawString(buf, 6, 6, 4);
+    spr.drawString(buf, 6, 6);
     return true;
   }
 
@@ -61,7 +62,7 @@ public:
     Invalidate();
   }
 
-  bool RenderIfDirty(TFT_eSPI& tft, TFT_eSprite& spr) override {
+  bool RenderIfDirty(LGFX_ILI9488_Touch& tft, LGFX_Sprite& spr) override {
     const int w = B().w, h = B().h;
     const int cx = w / 2, cy = h / 2;
     const int r  = (std::min(w, h) / 2) - 2;
@@ -78,7 +79,8 @@ public:
 
     char buf[16];
     snprintf(buf, sizeof(buf), "%02d:%02d", hours_, minutes_);
-    spr.drawString(buf, B().w / 2, B().h - B().h / 3, 4);
+    spr.setFont(&fonts::Font4);
+    spr.drawString(buf, B().w / 2, B().h - B().h / 3);
 
     // faint 12 dots (major hours only), 12/3/6/9 slightly larger
     for (int i = 0; i < 12; ++i) {
@@ -112,7 +114,7 @@ private:
   }
 
   // Replace your existing drawHandTaper_ with this:
-  static void drawHandTaper_(TFT_eSprite& spr, int cx, int cy,
+  static void drawHandTaper_(LGFX_Sprite& spr, int cx, int cy,
                             float a, float len, int baseW, uint16_t col) {
     // tip (points to angle a, with your polar_ convention)
     int xt, yt, xtail, ytail;
@@ -136,7 +138,7 @@ private:
   }
 
 
-  static void drawSecondLine_(TFT_eSprite& spr, int cx, int cy, float a, float len, uint16_t col) {
+  static void drawSecondLine_(LGFX_Sprite& spr, int cx, int cy, float a, float len, uint16_t col) {
     int xs, ys; polar_(cx, cy, a, len, xs, ys);
     spr.drawLine(cx, cy, xs, ys, col);
   }

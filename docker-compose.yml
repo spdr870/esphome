@@ -1,7 +1,8 @@
 services:
   esphome:
     container_name: esphome
-    image: ghcr.io/esphome/esphome
+    image: esphome/esphome:2026.11.0-dev20261014
+    #image: ghcr.io/esphome/esphome
     volumes:
       - ./config:/config
       - /etc/localtime:/etc/localtime:ro

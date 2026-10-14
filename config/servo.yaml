@@ -173,7 +173,9 @@ sensor:
           send_every: 1
       - lambda: |-
           // Convert voltage (0-3.3V) to percentage (0-100%)
-          return (x / 3.3) * 100.0;
+          float pct = (x / 3.3) * 100.0;
+          float corrected = sqrt(pct / 100.0) * 100.0;
+          return corrected;
     unit_of_measurement: "%"
     accuracy_decimals: 0
     on_value:
@@ -183,8 +185,8 @@ sensor:
             float pot_value = id(potentiometer).state;
             int solved_count = (id(maze_solved) ? 1 : 0) + (id(puzzle_solved) ? 1 : 0) + (id(wire_puzzle_solved) ? 1 : 0);
             
-            bool is_state_a = pot_value > 80.0;
-            bool is_state_b = pot_value < 55.0;
+            bool is_state_a = pot_value > 45.0;
+            bool is_state_b = pot_value < 31.0;
             
             if (is_state_a) {
               id(potentiometer_puzzle_position) = -1;

@@ -8,6 +8,8 @@ esp32:
     type: esp-idf
 
 logger:
+  level: ERROR
+
 api:
 
 ota:
@@ -16,6 +18,8 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  power_save_mode: NONE
+  output_power: 20dB
   ap:
     ssid: "Servotest Fallback Hotspot"
 
@@ -24,37 +28,83 @@ captive_portal:
 web_server:
   port: 80
 
-# =========================
-# Servo PWM
-# =========================
+espnow:
+  id: espnow_component
+  peers:
+    - 6C:C8:40:5D:B9:18
+  on_receive:
+    then:
+      - lambda: |-
+          //ESP_LOGE("espnow", "RX packet, size=%d", size);
+          
+          char buffer[256];
+          int pos = 0;
+
+          for (int i = 0; i < size; i++) {
+            pos += sprintf(&buffer[pos], "%02X ", data[i]);
+            if (pos > 240) break; // avoid overflow
+          }
+
+          //ESP_LOGE("espnow", "RAW: %s", buffer);
+
+          if (size != 4) {
+            ESP_LOGE("espnow", "Invalid packet size: %d", size);
+            return;
+          }
+
+          int16_t xi = (int16_t) ((data[0] << 8) | data[1]);
+          int16_t yi = (int16_t) ((data[2] << 8) | data[3]);
+
+          float x = xi / 1000.0f;
+          float y = yi / 1000.0f;
+
+          //ESP_LOGE("espnow", "Decoded: xi=%d yi=%d x=%.3f y=%.3f", xi, yi, x, y);
+
+          id(remote_joystick_x).publish_state(x);
+          id(remote_joystick_y).publish_state(y);
+
+text_sensor:
+  - platform: wifi_info
+    mac_address:
+      name: "WiFi MAC Address"
+
 output:
   - platform: ledc
-    pin: GPIO26
+    pin: GPIO25
     id: servo_pwm
     frequency: 50Hz
+  - platform: ledc
+    pin: GPIO26
+    id: servo_pwm2
+    frequency: 50Hz
 
-# =========================
-# Potentiometer (stuurt servo)
-# =========================
 sensor:
-  - platform: adc
-    pin: GPIO34
-    id: pot34
-    name: "Potmeter GPIO34"
-    attenuation: 11db
-    update_interval: 50ms
-    filters:
-      - clamp:
-          min_value: 0.14
-          max_value: 3.12
-      - lambda: |-
-          return (x - 0.14f) / (3.12f - 0.14f);
-      - clamp:
-          min_value: 0.0
-          max_value: 1.0
-      - sliding_window_moving_average:
-          window_size: 5
-          send_every: 1
+  - platform: template
+    id: remote_joystick_x
+    name: "Remote Joystick X"
+    accuracy_decimals: 3
+    on_value:
+      then:
+        - output.set_level:
+            id: servo_pwm2
+            level: !lambda |-
+              const float min_us = 500.0f;
+              const float max_us = 2500.0f;
+
+              float axis = x;
+
+              if (axis > 1.0f) axis = 1.0f;
+              if (axis < -1.0f) axis = -1.0f;
+
+              float normalized = (axis + 1.0f) / 2.0f;
+              float pulse_us = min_us + normalized * (max_us - min_us);
+
+              return pulse_us / 20000.0f;
+
+  - platform: template
+    id: remote_joystick_y
+    name: "Remote Joystick Y"
+    accuracy_decimals: 3
     on_value:
       then:
         - output.set_level:
@@ -62,12 +112,17 @@ sensor:
             level: !lambda |-
               const float min_us = 500.0f;
               const float max_us = 2500.0f;
-              float pulse_us = min_us + x * (max_us - min_us);
+
+              float axis = x;
+
+              if (axis > 1.0f) axis = 1.0f;
+              if (axis < -1.0f) axis = -1.0f;
+
+              float normalized = (axis + 1.0f) / 2.0f;
+              float pulse_us = min_us + normalized * (max_us - min_us);
+
               return pulse_us / 20000.0f;
 
-# =========================
-# Handmatige servo bediening (optioneel)
-# =========================
 number:
   - platform: template
     name: "Servo Pulse (µs)"

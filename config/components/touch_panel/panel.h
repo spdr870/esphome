@@ -14,27 +14,46 @@
 #include "ClockItem.h"
 
 #include "esphome.h"
-#include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
 
-namespace touch_panel {
+// --- LovyanGFX (display + touch) ---
+#include <LovyanGFX.hpp>
+#include "LGFX_ILI9488_Touch.h"
 
 #ifndef panel_h
 #define panel_h
+
+namespace touch_panel {
+
+// Convenience color constants (avoid TFT_* macros)
+static constexpr uint16_t COL_BLACK = 0x0000;
+// you can add more if you used them
 
 // ---------- Panel (grid + pages + routing) ----------
 class Panel : public esphome::Component {
 public:
   Panel(int tft_cs, int touch_cs, int touch_irq, int cols=3, int rows=3)
   : tft_cs_(tft_cs), touch_cs_(touch_cs), touch_irq_(touch_irq),
-    ts_(touch_cs_, touch_irq_), cols_(cols), rows_(rows), scratch_(&tft_) {}
+    // Use -D macros for DC/RST/SCLK/MOSI/MISO/BL from your build flags
+    tft_(tft_cs_,
+         TFT_DC,
+         TFT_RST,
+         TFT_SCLK,
+         TFT_MOSI,
+         TFT_MISO,
+         touch_cs_,
+         touch_irq_,
+#ifdef TFT_BL
+         TFT_BL
+#else
+        -1
+#endif
+    ),
+    cols_(cols), rows_(rows), scratch_(&tft_) {}
 
   ~Panel() {
-    // Free items we own
     for (auto* it : items_) delete it;
     items_.clear();
     last_bounds_.clear();
-    // Free the sprite buffer
     scratch_.deleteSprite();
   }
 
@@ -43,41 +62,32 @@ public:
     digitalWrite(tft_cs_, HIGH);
     pinMode(touch_cs_, OUTPUT);
     digitalWrite(touch_cs_, HIGH);
-    SPI.begin(TFT_SCLK,TFT_MISO,TFT_MOSI);
     if (touch_irq_ >= 0) pinMode(touch_irq_, INPUT_PULLUP);
 
-#ifdef TFT_BL
-    pinMode(TFT_BL, OUTPUT);
-    digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
-#endif
-
+    // LovyanGFX handles SPI init via config; no SPI.begin() needed.
     tft_.init();
-
     tft_.setRotation(3);
-    tft_.setSwapBytes(true);
-    tft_.invertDisplay(true);
-
-    ts_.begin();
-    ts_.setRotation(2);
+    tft_.setSwapBytes(true);   // keep if your bitmaps need it
 
     screen_ = {0,0,480,320};
     grid_   = screen_;
     compute_grid_();
 
     digitalWrite(touch_cs_, HIGH);
-    tft_.fillScreen(TFT_BLACK);
+    tft_.fillScreen(COL_BLACK);
 
-    // Prepare shared scratch sprite (lazy sized on first use)
+    // Prepare shared scratch sprite (lazy-sized on first use)
     scratch_.setColorDepth(8);
     scratch_w_ = scratch_h_ = 0;
+
+    // If you want built-in touch calibration later:
+    // tft_.calibrateTouch(...); // or tft_.setTouchCalibrate(...)
   }
 
   void loop() override {
     power_step_();
 
-    if (pwr_ != AWAKE) {
-      return;
-    }
+    if (pwr_ != AWAKE) return;
 
     uint32_t now = millis();
     for (auto* it : items_) if (it->Page()==current_page_) it->Tick(now);
@@ -90,32 +100,27 @@ public:
       if (it->Page()!=current_page_) continue;
       if (!it->ClearDirty()) continue;
 
-      // Ensure sprite is at least the item's size; only grow (rare).
       const auto& b = last_bounds_[it];
-      ensure_scratch_(b.w, b.h);
+      ensure_scratch_exact_(b.w, b.h);        // exact size to keep blits tight
 
-      // Clear the scratch area once per item before it draws.
-      scratch_.fillSprite(TFT_BLACK);
-
-      // Let the item render into the shared sprite and push.
+      scratch_.fillScreen(COL_BLACK);
       it->RenderIfDirty(tft_, scratch_);
 
-      // Ensure touch is not selected while we talk to TFT
-      //digitalWrite(touch_cs_, HIGH);
       digitalWrite(touch_cs_, HIGH);
-      //std::lock_guard<std::mutex> lk(spi_mtx_);
       tft_tx([&](){
-        scratch_.pushSprite(b.x, b.y, 0, 0, b.w, b.h);
+        // LGFX_Sprite::pushSprite has no src-rect overload; we sized exactly.
+        scratch_.pushSprite(b.x, b.y);
       });
     }
 
     if (items_.empty()) {
       if ((int32_t)(now - deadline_) >= 0) {
         deadline_ = now + 100;
-        //std::lock_guard<std::mutex> lk(spi_mtx_);
         tft_tx([&](){
-          tft_.setTextColor(tft_.color565(random(256), random(256), random(256)), TFT_BLACK);
-          tft_.drawString("Hello!", 10, 10, 4);
+          auto randc = lgfx::color565(random(256), random(256), random(256));
+          tft_.setTextColor(randc, COL_BLACK);
+          tft_.setFont(&fonts::Font4);
+          tft_.drawString("Hello!", 10, 10);
         });
       }
     }
@@ -169,33 +174,31 @@ public:
   }
 
   void set_env(float t, float h) {
-    for (auto* it : items_) it->OnEnvUpdate(t, h); 
+    for (auto* it : items_) it->OnEnvUpdate(t, h);
   }
 
   void next_page(){ set_page_(current_page_+1); }
   void prev_page(){ set_page_(current_page_==0 ? max_page_() : current_page_-1); }
   int  page() const { return current_page_; }
 
-  void ready()
-  {
+  void ready() {
     pwr_ = AWAKE;
     requestSleep_ = false;
   }
 
-  void request_sleep(bool on)
-  {
+  void request_sleep(bool on) {
     requestSleep_ = on;
   }
 
 private:
   std::mutex spi_mtx_;
+
   // ---------- Hardware ----------
   int tft_cs_, touch_cs_, touch_irq_;
-  TFT_eSPI tft_;
-  XPT2046_Touchscreen ts_;
+  LGFX_ILI9488_Touch tft_;
 
   // Shared scratch sprite
-  TFT_eSprite scratch_;
+  lgfx::LGFX_Sprite scratch_;
   int scratch_w_{0}, scratch_h_{0};
 
   // ---------- Layout ----------
@@ -206,7 +209,7 @@ private:
   std::unordered_map<IPanelItem*,Rect> last_bounds_;
 
   int current_page_{0};
-  
+
   enum PwrState { NOINIT, AWAKE, GOING_OFF_DISPOFF, GOING_OFF_SLEEPIN_WAIT, SLEEPING,
                 WAKING_SLEEPOUT_WAIT, WAKING_DISPON, WAKING_SETTLE_WAIT };
   PwrState pwr_ = AWAKE;
@@ -216,30 +219,17 @@ private:
 
   inline void tft_tx(std::function<void()> fn) {
     std::lock_guard<std::mutex> lk(spi_mtx_);
-  #ifdef TFT_eSPI_ENABLE_DMA
-    tft_.dmaWait();                  // finish any prior DMA first
-  #endif
+    tft_.waitDMA();         // finish any prior DMA first
     tft_.startWrite();
-    fn();                            // do the SPI writes
+    fn();                   // do the SPI writes
     tft_.endWrite();
-  }
-
-  inline bool touch_read(TS_Point &p) {
-    std::lock_guard<std::mutex> lk(spi_mtx_);
-  #ifdef TFT_eSPI_ENABLE_DMA
-    tft_.dmaWait();                  // make sure TFT is idle before reading touch
-  #endif
-    p = ts_.getPoint();              // XPT2046 lib handles its own CS
-    return true;
   }
 
   inline void lcd_cmd(uint8_t c) {
     std::lock_guard<std::mutex> lk(spi_mtx_);
-    #ifdef TFT_eSPI_ENABLE_DMA
-    tft_.dmaWait();
-    #endif
+    tft_.waitDMA();
     tft_.startWrite();
-    tft_.writecommand(c);
+    tft_.writeCommand(c);
     tft_.endWrite();
   }
 
@@ -276,7 +266,7 @@ private:
         }
         break;
     }
-    
+
     if ((int32_t)(now - deadline_) >= 0) {
       switch (pwr_) {
         case GOING_OFF_DISPOFF:
@@ -291,12 +281,12 @@ private:
 
         case WAKING_SLEEPOUT_WAIT:
           lcd_cmd(0x29); // DISP ON
-          deadline_ = now + 20;                                        // settle
+          deadline_ = now + 20; // settle
           pwr_ = WAKING_SETTLE_WAIT;
           break;
 
         case WAKING_SETTLE_WAIT:
-          tft_tx([&](){ tft_.fillScreen(TFT_BLACK); });
+          tft_tx([&](){ tft_.fillScreen(COL_BLACK); });
           invalidate_visible_page_();
           pwr_ = AWAKE;
           break;
@@ -347,55 +337,28 @@ private:
   }
 
   bool read_touch_(int16_t &x,int16_t &y){
-      // Ensure TFT is not using SPI (DMA or normal)
-  //tft_.dmaWait();        // no-op if DMA not active
-  //tft_.endWrite();       // make sure TFT has released SPI & CS
-
-    bool pressed=false;
-
-    if (touch_irq_>=0){
-      pressed=(digitalRead(touch_irq_)==LOW);
-      if(!pressed) return false;
-    } else {
-      // Serialize against any TFT DMA/writes
-      {
-        std::lock_guard<std::mutex> lk(spi_mtx_);
-      #ifdef TFT_eSPI_ENABLE_DMA
-        tft_.dmaWait();
-      #endif
-        // Ensure TFT is not holding the bus
-        tft_.endWrite();
-        pressed = ts_.touched();  // if this uses SPI on your lib, we're safe now
-      }
-      if (!pressed) return false;
+    bool touched = false;
+    {
+      tft_.waitDMA();
+      // getTouch returns false when not touched; returns pixel coords when true
+      touched = tft_.getTouch(&x, &y);
     }
+    if (!touched) return false;
 
-    TS_Point p;
-    if (!touch_read(p)) return false;
-
-    if (p.z<5 || p.z>4095) return false;
-
-    static constexpr int RAW_X_MIN = 200;
-    static constexpr int RAW_X_MAX = 3800;
-    static constexpr int RAW_Y_MIN = 200;
-    static constexpr int RAW_Y_MAX = 3800;
-
-    int16_t mx = map(p.y, RAW_Y_MIN, RAW_Y_MAX, 0, 480);
-    int16_t my = map(p.x, RAW_X_MIN, RAW_X_MAX, 0, 320);
-    x = std::max<int16_t>(0, std::min<int16_t>(479, mx));
-    y = std::max<int16_t>(0, std::min<int16_t>(319, my));
+    // Clamp to screen (rotation already applied by LGFX)
+    x = std::max<int16_t>(0, std::min<int16_t>(479, x));
+    y = std::max<int16_t>(0, std::min<int16_t>(319, y));
     return true;
   }
 
   // ---------- Scratch sprite mgmt ----------
-  void ensure_scratch_(int w, int h){
-    // Only grow; reuse if current is big enough.
-    if (w <= scratch_w_ && h <= scratch_h_) return;
+  void ensure_scratch_exact_(int w, int h){
+    // Recreate if size differs to ensure tight blits
+    if (w == scratch_w_ && h == scratch_h_) return;
     scratch_.deleteSprite();
-    scratch_.createSprite(std::max<int16_t>(scratch_w_, w), 
-                          std::max<int16_t>(scratch_h_, h));
-    scratch_w_ = std::max<int16_t>(scratch_w_, w);
-    scratch_h_ = std::max<int16_t>(scratch_h_, h);
+    scratch_.createSprite(w, h);
+    scratch_w_ = w;
+    scratch_h_ = h;
   }
 };
 

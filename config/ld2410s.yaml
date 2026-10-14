@@ -1,0 +1,135 @@
+esphome:
+  name: ld2410s
+  friendly_name: ld2410s
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  flash_mode: dio
+  flash_frequency: 40MHz
+  framework:
+    type: esp-idf
+
+#external_components:
+#  - source: github://NovakIrs/esphome@ld2410s
+  #- source: github://pr#8486
+#    components: [ld2410s]
+  #  refresh: 1h
+  
+logger:
+  level: WARN
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Devboard Fallback Hotspot"
+
+api:
+
+web_server:
+  port: 80
+
+ota:
+  - platform: esphome
+    version: 2
+
+uart:
+  id: uart_bus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+  parity: NONE
+  stop_bits: 1
+
+ld2410s:
+  uart_id: uart_bus
+
+globals:
+  - id: desired_brightness
+    type: float
+    restore_value: no
+    initial_value: "0.05"
+  - id: applied_brightness
+    type: float
+    restore_value: no
+    initial_value: "-1.0"
+
+sensor:
+  - platform: ld2410s
+    distance:
+      name: "Target Distance"
+      on_value:
+        then:
+          - lambda: |-
+              float d = x;  // centimeters
+
+              float no_target_threshold = 1.0;
+              float min_d = 75.0;
+              float max_d = 250.0;
+
+              float t;
+
+              if (d <= no_target_threshold) {
+                t = 0.0;
+              } else if (d <= min_d) {
+                t = 1.0;
+              } else if (d >= max_d) {
+                t = 0.0;
+              } else {
+                t = 1.0 - ((d - min_d) / (max_d - min_d));
+              }
+
+              id(desired_brightness) = t;
+
+binary_sensor:
+  - platform: ld2410s
+    has_target:
+      name: Presence
+      on_press:
+        then:
+          - light.turn_on: onboard_led
+      on_release:
+        then:
+          - light.turn_off: onboard_led
+
+number:
+  - platform: ld2410s
+    max_distance:
+      name: Max detect distance
+    min_distance:
+      name: Min detect distance
+    no_delay:
+      name: No detect report delay
+    status_reporting_frequency:
+      name: Status reporting frequency
+    distance_reporting_frequency:
+      name: Distance reporting frequency
+
+#button:
+#  - platform: ld2410s
+#    calibration:
+#      name: Start auto calibration
+#    factory_reset:
+#      name: Factory reset
+
+select:
+  - platform: ld2410s
+    response_speed:
+      name: Response speed
+
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: onboard_led_output
+
+light:
+  - platform: binary
+    name: "Onboard Presence LED"
+    id: onboard_led
+    output: onboard_led_output
+    restore_mode: ALWAYS_OFF
+#switch:
+#  - platform: ld2410s
+#    minimal_output:
+#      name: Minimal output

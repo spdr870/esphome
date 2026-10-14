@@ -286,7 +286,7 @@ interval:
             not:
               api.connected:
           then:
-            - lambda: |-
+            - lambda: !lambda |-
                 if (id(fan_mode_idx) != 0) {   // force Auto when disconnected
                   id(fan_mode_idx) = 0;
                   id(publish_mode_states).execute();

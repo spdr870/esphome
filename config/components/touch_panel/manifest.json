@@ -3,8 +3,7 @@
   "version": "1.0",
   "dependencies": [
     {
-      "name": "TFT_eSPI",
-      "version": "^2.5.43"
+      "name": "LovyanGFX"
     }
   ]
 }

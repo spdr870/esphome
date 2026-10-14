@@ -1,21 +1,14 @@
 esphome:
   name: touch-panel
- # platformio_options:
- #   board_build.arduino.memory_type: qio_opi
- #   build_flags:
- #     - -D BOARD_HAS_PSRAM
+  build_path: build
+  
 esp32:
-  board: esp32s3box
+  board: esp32-s3-devkitc-1
   framework:
-    type: arduino
-  #flash_size: 16MB
-
-#psram:
- # mode: octal
- # speed: 80MHz
+    type: esp-idf
 
 logger:
-  level: DEBUG
+  level: WARN
 
 api:
 
@@ -30,19 +23,18 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
-interval:
-  - interval: 30s
-    then:
-      - lambda: |-
-
 light:
   - platform: esp32_rmt_led_strip
-    name: "Onboard RGB"
-    id: onboard_rgb
-    pin: GPIO48
-    num_leds: 1
-    chipset: WS2812
+    name: "LED Strip"
+    pin: GPIO4
+    num_leds: 90
     rgb_order: GRB
-    rmt_channel: 0
+    chipset: WS2812
+    restore_mode: RESTORE_DEFAULT_OFF
+
     effects:
       - addressable_rainbow:
+      - addressable_color_wipe:
+      - addressable_scan:
+      - addressable_twinkle:
+      - addressable_fireworks:

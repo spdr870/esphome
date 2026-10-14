@@ -20,7 +20,7 @@ psram:
   speed: 40MHz
 
 logger:
-  level: WARN
+  level: ERROR
 
 api:
 
@@ -76,7 +76,7 @@ media_player:
   - platform: speaker
     id: s3_radio
     name: "S3 I2S DAC"
-    buffer_size: 800000
+    buffer_size: 500000 # was 800000 before, reasonable stable
     codec_support_enabled: true
     task_stack_in_psram: false
     volume_initial: 100%
@@ -103,12 +103,12 @@ globals:
     initial_value: '0'
 
   - id: current_name
-    type: std::string
+    type: const char*
     restore_value: no
     initial_value: '""'
 
   - id: current_url
-    type: std::string
+    type: const char*
     restore_value: no
     initial_value: '""'
 
@@ -494,9 +494,9 @@ i2c:
     scan: false
     frequency: 400kHz
   - id: bus_sht
-    #frequency: 100kHz
-    sda: 14
-    scl: 13
+    frequency: 50kHz
+    sda: 39
+    scl: 40
     scan: true
 
 sensor:

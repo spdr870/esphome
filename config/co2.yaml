@@ -1,3 +1,4 @@
+
 esphome:
   name: co2
   friendly_name: CO2 Sensor
@@ -6,161 +7,6 @@ esp32:
   board: esp32dev
   framework:
     type: esp-idf
-
-i2c:
-- id: bus_display
-  sda: GPIO16
-  scl: GPIO19
-  scan: false
-- id: bus_a
-  frequency: 400kHz
-  sda: 21
-  scl: 22
-  scan: true
-
-globals:
-  - id: co2_level
-    type: int
-  - id: presence_start_time
-    type: unsigned long
-    restore_value: no
-    initial_value: '0'
-
-font:
-  - file: "gfonts://Roboto"
-    id: small
-    size: 12
-  - file: "gfonts://Roboto"
-    id: large
-    size: 28
-
-interval:
-  - interval: 1s
-    then:
-      - if:
-          condition:
-            binary_sensor.is_on: pir_motion
-          then:
-            - component.update: oled_display
-  - interval: 10s
-    then:
-      - if:
-          condition:
-            not:
-              binary_sensor.is_on: pir_motion
-          then:
-            - component.update: oled_display
-
-
-display:
-  - platform: ssd1306_i2c
-    i2c_id: bus_display
-    model: "SSD1306 128x64"
-    id: oled_display
-    address: 0x3C
-    update_interval: never
-    lambda: |-
-      if (!id(pir_motion).state) return;
-
-      // Compute how long presence has been detected
-      unsigned long elapsed_ms = millis() - id(presence_start_time);
-      unsigned long seconds = elapsed_ms / 1000;
-      unsigned long minutes = seconds / 60;
-      unsigned long hours   = minutes / 60;
-
-      if (seconds < 60) {
-        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu sec", seconds);
-      } else if (minutes < 2) {
-        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu:%02lu min", minutes, seconds % 60);
-      } else if (minutes < 60) {
-        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu min", minutes);
-      } else {
-        it.printf(127, 64, id(large), TextAlign::BOTTOM_RIGHT, "%lu:%02lu hrs", hours, minutes % 60);
-      }
-
-      it.printf(0, 0, id(small), TextAlign::TOP_LEFT, "CO2");
-      it.printf(127, 0, id(large), TextAlign::TOP_RIGHT, "%d", id(co2_level));
-
-number:
-  - platform: template
-    name: "Set CO2 Level"
-    id: co2_level_setter
-    optimistic: true
-    min_value: 400
-    max_value: 2500
-    step: 1
-    set_action:
-      - lambda: |-
-          id(co2_level) = (int)x;
-          ESP_LOGI("main", "CO2 level manually set to %d", id(co2_level));
-
-binary_sensor:
-  - platform: gpio
-    id: pir_motion
-    name: "Radar Presence"
-    pin:
-      number: GPIO17
-    device_class: motion
-    filters:
-      - delayed_off: 1s
-      - delayed_on: 250ms
-    on_press:
-      - lambda: |-
-          // Store the current time in milliseconds
-          id(presence_start_time) = millis();
-    on_release:
-      - lambda: |-
-          // Reset timer when presence ends
-          id(presence_start_time) = 0;
-
-sensor:
-  - platform: template
-    id: co2_level_sensor
-    name: "CO2 Level"
-    lambda: |-
-      return id(co2_level);
-    update_interval: 10s  # how often to check
-
-    on_value:
-      then:
-        - lambda: |-
-            const float v = id(co2_level);
-            float r = 0.0f;
-
-            if (v < 1200.0f) {
-              r = 0.0f;
-            } else if (v < 2100.0f) {
-              r = (v - 1200.0f) / 900.0f * 1.0f;
-            } else {
-              r = 1.0f;
-            }
-
-            // Small deadband to avoid tiny updates & flicker
-            if (r < 0.02f) {
-              id(led_red).turn_off();                        // truly off near zero
-            } else {
-              id(led_red).set_level(r);
-            }
-
-
-  - platform: scd4x
-    i2c_id: bus_a
-    address: 0x62
-    update_interval: 60s
-    co2:
-      name: "CO2"
-      id: co2_ppm
-      on_value:
-        then:
-          - lambda: |-
-              const float v = id(co2_ppm).state;
-              id(co2_level) = v;
-
-    temperature:
-      name: "CO2 Sensor Temperature"
-    humidity:
-      name: "CO2 Sensor Humidity"
-    automatic_self_calibration: true
 
 logger:
   level: WARN
@@ -176,11 +22,450 @@ api:
 
 web_server:
   port: 80
+  include_internal: true
 
 ota:
   - platform: esphome
     version: 2
 
+# I2C buses
+i2c:
+  - id: bus_display
+    sda: GPIO16
+    scl: GPIO19
+    scan: false
+
+  - id: bus_a
+    frequency: 400kHz
+    sda: GPIO21
+    scl: GPIO22
+    scan: true
+
+# LD2410S radar UART
+uart:
+  id: radar_uart
+  tx_pin: GPIO23
+  rx_pin: GPIO17
+  baud_rate: 115200
+  parity: NONE
+  stop_bits: 1
+
+ld2410s:
+  uart_id: radar_uart
+
+globals:
+  - id: co2_level
+    type: int
+    initial_value: '0'
+
+  # Sitting timer
+  - id: presence_start_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+  # Away timer
+  - id: away_start_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+  # Last completed away duration
+  - id: last_away_duration
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+  # Time of return
+  - id: return_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+  # Timer states
+  - id: away_started
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: show_away
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+font:
+  - file: "gfonts://Roboto"
+    id: small
+    size: 12
+  - file: "gfonts://Roboto"
+    id: medium
+    size: 18
+  - file: "gfonts://Roboto"
+    id: large
+    size: 28
+
+# OLED refresh while presence is detected
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            binary_sensor.is_on: pir_motion
+          then:
+            - component.update: oled_display
+
+display:
+  - platform: ssd1306_i2c
+    i2c_id: bus_display
+    model: "SSD1306 128x64"
+    id: oled_display
+    address: 0x3C
+    update_interval: never
+
+    lambda: |-
+      // Screen off when nobody is present
+      if (!id(pir_motion).state) {
+        it.fill(COLOR_OFF);
+        return;
+      }
+
+      unsigned long now = millis();
+
+      // --------------------------------
+      // Sitting timer / Away information
+      // --------------------------------
+
+      bool showing_away =
+          id(show_away) &&
+          (now - id(return_time) < 10000UL);
+      
+      if (showing_away) {
+      
+        unsigned long seconds =
+            id(last_away_duration) / 1000UL;
+      
+        unsigned long minutes = seconds / 60UL;
+        unsigned long hours = minutes / 60UL;
+      
+        // White highlight bar
+        const int bar_y = 34;
+        const int bar_height = 25;
+      
+        it.filled_rectangle(
+          0, bar_y, 128, bar_height,
+          COLOR_ON
+        );
+      
+        // Centered, inverted text
+        const int text_x = 64;
+        const int text_y = bar_y + bar_height / 2;
+      
+        if (seconds < 60) {
+          it.printf(
+            text_x, text_y, id(medium),
+            COLOR_OFF, TextAlign::CENTER,
+            "%lu sec away", seconds
+          );
+      
+        } else if (minutes < 2) {
+          it.printf(
+            text_x, text_y, id(medium),
+            COLOR_OFF, TextAlign::CENTER,
+            "%lu:%02lu min away",
+            minutes, seconds % 60
+          );
+      
+        } else if (minutes < 60) {
+          it.printf(
+            text_x, text_y, id(medium),
+            COLOR_OFF, TextAlign::CENTER,
+            "%lu min away", minutes
+          );
+      
+        } else {
+          it.printf(
+            text_x, text_y, id(medium),
+            COLOR_OFF, TextAlign::CENTER,
+            "%lu:%02lu hrs away",
+            hours, minutes % 60
+          );
+        }
+      
+      } else {
+
+        // Normal sitting timer
+        unsigned long elapsed_ms =
+            now - id(presence_start_time);
+
+        unsigned long seconds =
+            elapsed_ms / 1000UL;
+
+        unsigned long minutes =
+            seconds / 60UL;
+
+        unsigned long hours =
+            minutes / 60UL;
+
+        if (seconds < 60) {
+          it.printf(
+            127, 61, id(large),
+            TextAlign::BOTTOM_RIGHT,
+            "%lu sec", seconds
+          );
+
+        } else if (minutes < 2) {
+          it.printf(
+            127, 61, id(large),
+            TextAlign::BOTTOM_RIGHT,
+            "%lu:%02lu min",
+            minutes, seconds % 60
+          );
+
+        } else if (minutes < 60) {
+          it.printf(
+            127, 61, id(large),
+            TextAlign::BOTTOM_RIGHT,
+            "%lu min", minutes
+          );
+
+        } else {
+          it.printf(
+            127, 61, id(large),
+            TextAlign::BOTTOM_RIGHT,
+            "%lu:%02lu hrs",
+            hours, minutes % 60
+          );
+        }
+      }
+
+      // --------------------------------
+      // CO2 display
+      // --------------------------------
+
+      it.printf(
+        0, 0, id(small),
+        TextAlign::TOP_LEFT,
+        "CO2"
+      );
+
+      it.printf(
+        127, 0, id(large),
+        TextAlign::TOP_RIGHT,
+        "%d", id(co2_level)
+      );
+
+      // --------------------------------
+      // Radar distance indicator
+      // --------------------------------
+
+      // Configuration
+      const float min_distance = 0.8f;
+      const float max_distance = 2.2f;
+      const int steps = 8;
+      const int gap = 2;
+
+      // Get radar distance in meters
+      float d = id(radar_distance).state / 100.0f;
+
+      if (std::isfinite(d) &&
+          d > 0.0f &&
+          max_distance > min_distance &&
+          steps >= 2 &&
+          steps <= 64) {
+
+        // Normalize distance
+        float normalized =
+            (d - min_distance) /
+            (max_distance - min_distance);
+
+        normalized =
+            fmaxf(0.0f, fminf(1.0f, normalized));
+
+        // Closer = more bars
+        int active = steps -
+            (int) floorf(
+              normalized * (steps - 1) + 0.5f
+            );
+
+        active =
+            std::max(1, std::min(steps, active));
+
+        // Draw on bottom pixel row
+        const int width = 128;
+        const int y = 63;
+
+        for (int i = 0; i < active; i++) {
+          int x1 = i * width / steps;
+          int x2 = (i + 1) * width / steps - 1;
+
+          if (i < steps - 1) {
+            x2 -= gap;
+          }
+
+          if (x2 >= x1) {
+            it.line(x1, y, x2, y);
+          }
+        }
+      }
+
+# LD2410S presence detection
+binary_sensor:
+  - platform: ld2410s
+    has_target:
+      id: pir_motion
+      name: "Radar Presence"
+      device_class: occupancy
+
+      filters:
+        - delayed_off: 1s
+        - delayed_on: 250ms
+
+      # Someone returns to the desk
+      on_press:
+        then:
+          - lambda: |-
+              unsigned long now = millis();
+
+              // Restart sitting timer immediately
+              id(presence_start_time) = now;
+
+              // If we've been away, store the duration
+              if (id(away_started)) {
+                id(last_away_duration) =
+                    now - id(away_start_time);
+
+                id(return_time) = now;
+                id(show_away) = true;
+                id(away_started) = false;
+
+              } else {
+                // First detection after boot
+                id(show_away) = false;
+              }
+
+          - component.update: oled_display
+
+      # Someone leaves the desk
+      on_release:
+        then:
+          - lambda: |-
+              // Start away timer immediately
+              id(away_start_time) = millis();
+              id(away_started) = true;
+
+              // Cancel any previous away message
+              id(show_away) = false;
+
+              // Reset sitting timer
+              id(presence_start_time) = 0;
+
+          - component.update: oled_display
+
+select:
+  - platform: ld2410s
+    response_speed:
+      name: "Radar Response Speed"
+      internal: true
+
+sensor:
+  # LD2410S distance
+  - platform: ld2410s
+    distance:
+      id: radar_distance
+      name: "Radar Target Distance"
+      internal: true
+
+  # Manually tracked CO2 value
+  - platform: template
+    id: co2_level_sensor
+    name: "CO2 Level"
+    lambda: |-
+      return id(co2_level);
+    update_interval: 10s
+
+    on_value:
+      then:
+        - lambda: |-
+            const float v = id(co2_level);
+            float r = 0.0f;
+
+            if (v < 1200.0f) {
+              r = 0.0f;
+            } else if (v < 2100.0f) {
+              r = (v - 1200.0f) / 900.0f;
+            } else {
+              r = 1.0f;
+            }
+
+            if (r < 0.02f) {
+              id(led_red).turn_off();
+            } else {
+              id(led_red).set_level(r);
+            }
+
+  # SCD4x CO2 sensor
+  - platform: scd4x
+    i2c_id: bus_a
+    address: 0x62
+    update_interval: 60s
+
+    co2:
+      name: "CO2"
+      id: co2_ppm
+      on_value:
+        then:
+          - lambda: |-
+              id(co2_level) = (int)x;
+
+    temperature:
+      name: "CO2 Sensor Temperature"
+
+    humidity:
+      name: "CO2 Sensor Humidity"
+
+    automatic_self_calibration: true
+
+# Manual CO2 override and radar settings
+number:
+  - platform: template
+    name: "Set CO2 Level"
+    id: co2_level_setter
+    optimistic: true
+    min_value: 400
+    max_value: 2500
+    step: 1
+    internal: true
+    set_action:
+      - lambda: |-
+          id(co2_level) = (int)x;
+          ESP_LOGI(
+            "main",
+            "CO2 level manually set to %d",
+            id(co2_level)
+          );
+
+  - platform: ld2410s
+    max_distance:
+      name: "Radar Max Detect Distance"
+      internal: true
+
+    min_distance:
+      name: "Radar Min Detect Distance"
+      internal: true
+
+    no_delay:
+      name: "Radar No Detect Report Delay"
+      internal: true
+
+    status_reporting_frequency:
+      name: "Radar Status Reporting Frequency"
+      internal: true
+
+    distance_reporting_frequency:
+      name: "Radar Distance Reporting Frequency"
+      internal: true
+
+# Red LED driven by CO2 concentration
 output:
   - platform: ledc
     pin: GPIO18
@@ -192,3 +477,4 @@ light:
     name: "Red led"
     id: red
     default_transition_length: 1.5s
+    internal: true

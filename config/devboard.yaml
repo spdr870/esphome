@@ -11,6 +11,7 @@ esp32:
     type: esp-idf
 
 logger:
+  level: WARN
 
 api:
   reboot_timeout: 0s
@@ -75,7 +76,7 @@ display:
     id: oled_display
     address: 0x3C
     update_interval: 1s
-    lambda: |-
+    lambda: !lambda |-
       // Als er BBQ probe-waarden zijn, toon die met kleine font i.p.v. datum/tijd
       bool p1 = id(ibbq_p1).has_state() && !std::isnan(id(ibbq_p1).state);
       bool p2 = id(ibbq_p2).has_state() && !std::isnan(id(ibbq_p2).state);
@@ -197,8 +198,8 @@ binary_sensor:
       number: GPIO33
     device_class: motion
     filters:
-      - delayed_on: 2s
-      - delayed_off: 5s
+      - delayed_on: 0s
+      - delayed_off: 0s
     on_press:
       then:
         - globals.set: { id: presence_detected, value: 'true' }
